@@ -20,7 +20,7 @@ pubspec.lock
 .DS_Store
 Thumbs.db
 
-# AIDE (nunca subir al repo)
+# AIDE
 aide.db
 aide.db.new
 

@@ -80,6 +80,12 @@ tfg-fim-grafico/
 
 ---
 
+## ⚠️ Dependencias externas
+Este proyecto requiere AIDE (licencia GPL v2) instalado 
+en el sistema. AIDE no está incluido en este repositorio.
+
+---
+
 ## 📄 Licencia
 
 MIT License — ver [LICENSE](LICENSE)

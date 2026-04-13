@@ -1,0 +1,17 @@
+﻿# Flutter
+fim_monitor_flutter/build/
+fim_monitor_flutter/.dart_tool/
+fim_monitor_flutter/.flutter-plugins
+fim_monitor_flutter/.flutter-plugins-dependencies
+fim_monitor_flutter/*.g.dart
+fim_monitor_flutter/windows/flutter/generated_*
+
+# Java / Maven
+fim-backend/target/
+fim-backend/*.class
+fim-backend/.mvn/
+fim-backend/**/*.db
+
+# General
+.DS_Store
+*.log

@@ -50,7 +50,6 @@ class _FimGraphWidgetState extends State<FimGraphWidget> {
       return n;
     }
 
-    // Nodo raíz
     getOrCreate('/');
     _nodeAlerts['/'] = AlertModel(
       id: -1,
@@ -64,7 +63,6 @@ class _FimGraphWidgetState extends State<FimGraphWidget> {
       final alert = entry.value;
       _nodeAlerts[path] = alert;
 
-      // Crear todos los nodos intermedios de la ruta
       final parts = path.split('/').where((p) => p.isNotEmpty).toList();
       String current = '';
       for (int i = 0; i < parts.length; i++) {
@@ -82,13 +80,6 @@ class _FimGraphWidgetState extends State<FimGraphWidget> {
         _graph.addEdge(getOrCreate(parent), getOrCreate(current));
       }
     }
-  }
-
-  String _parentOf(String path) {
-    if (path == '/') return '/';
-    final parts = path.split('/')..removeLast();
-    final p = parts.join('/');
-    return p.isEmpty ? '/' : p;
   }
 
   void _resetZoom() =>
@@ -109,10 +100,26 @@ class _FimGraphWidgetState extends State<FimGraphWidget> {
   @override
   Widget build(BuildContext context) {
     return BlocConsumer<GraphBloc, GraphState>(
-      listenWhen: (p, c) => c is GraphLoaded,
+      // Reconstruir el grafo (layout) solo cuando cambia nodeMap,
+      // NO cuando solo cambia snapshotOverride (eso solo repinta colores).
+      listenWhen: (p, c) {
+        if (p is GraphLoaded && c is GraphLoaded) {
+          return p.nodeMap != c.nodeMap;
+        }
+        return c is GraphLoaded;
+      },
       listener: (context, state) {
         if (state is GraphLoaded) setState(() => _rebuildGraph(state.nodeMap));
       },
+      // buildWhen incluye snapshotOverride para repintar colores
+      buildWhen: (p, c) =>
+          c is! GraphLoaded ||
+          p is! GraphLoaded ||
+          p.nodeMap != c.nodeMap ||
+          p.selectedRuta != c.selectedRuta ||
+          p.filterSeveridad != c.filterSeveridad ||
+          p.searchQuery != c.searchQuery ||
+          p.snapshotOverride != c.snapshotOverride,
       builder: (context, state) => switch (state) {
         GraphInitial() || GraphLoading() => const _LoadingView(),
         GraphError(:final message) => _ErrorView(message: message),
@@ -123,7 +130,6 @@ class _FimGraphWidgetState extends State<FimGraphWidget> {
   }
 
   Widget _buildLoaded(BuildContext context, GraphLoaded state) {
-    // Aplicar filtros localmente
     final filteredMap = Map.fromEntries(
       state.nodeMap.entries.where((e) {
         final alert = e.value;
@@ -137,8 +143,15 @@ class _FimGraphWidgetState extends State<FimGraphWidget> {
       }),
     );
     _rebuildGraph(filteredMap);
+
     return Column(
       children: [
+        // Banner de "viaje en el tiempo" cuando el slider no está en vivo
+        if (state.snapshotOverride != null)
+          _SnapshotBanner(
+            onLive: () =>
+                context.read<GraphBloc>().add(const GraphSnapshotApplied(null)),
+          ),
         GraphFilterBar(
           selected: state.filterTipo,
           selectedSeveridad: state.filterSeveridad,
@@ -183,11 +196,21 @@ class _FimGraphWidgetState extends State<FimGraphWidget> {
                     final dimmed = q != null &&
                         q.isNotEmpty &&
                         !path.toLowerCase().contains(q);
+
+                    // Si hay snapshot activo, obtener el tipoCambio histórico
+                    // para este nodo. Si no aparece en el snapshot = CLEAN.
+                    final snapshotTipo = state.snapshotOverride != null
+                        ? (state.snapshotOverride![path] ?? 'CLEAN')
+                        : null;
+
                     return _FimNode(
                       path: path,
                       alert: alert,
                       isSelected: state.selectedRuta == path,
                       dimmed: dimmed,
+                      // snapshotTipo sobrescribe el color del nodo cuando
+                      // el slider no está en la posición de en vivo
+                      snapshotTipo: snapshotTipo,
                       onTap: () => context
                           .read<GraphBloc>()
                           .add(GraphNodeSelected(path)),
@@ -215,23 +238,80 @@ class _FimGraphWidgetState extends State<FimGraphWidget> {
   }
 }
 
+// ── Banner de snapshot histórico ──────────────────────────────────────────────
+
+class _SnapshotBanner extends StatelessWidget {
+  final VoidCallback onLive;
+  const _SnapshotBanner({required this.onLive});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+      color: const Color(0xFF00D4FF).withOpacity(0.08),
+      child: Row(
+        children: [
+          const Icon(Icons.history, size: 14, color: Color(0xFF00D4FF)),
+          const SizedBox(width: 8),
+          const Text(
+            'Viendo estado histórico — el grafo muestra el pasado',
+            style: TextStyle(
+              color: Color(0xFF00D4FF),
+              fontSize: 11,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          const Spacer(),
+          GestureDetector(
+            onTap: onLive,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+              decoration: BoxDecoration(
+                color: const Color(0xFF00D4FF).withOpacity(0.15),
+                borderRadius: BorderRadius.circular(12),
+                border:
+                    Border.all(color: const Color(0xFF00D4FF).withOpacity(0.4)),
+              ),
+              child: const Text(
+                'Volver a EN VIVO',
+                style: TextStyle(
+                  color: Color(0xFF00D4FF),
+                  fontSize: 10,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 // ── Nodo ──────────────────────────────────────────────────────────────────────
+
 class _FimNode extends StatelessWidget {
   final String path;
   final AlertModel? alert;
   final bool isSelected;
   final bool dimmed;
   final VoidCallback onTap;
-  const _FimNode(
-      {required this.path,
-      required this.alert,
-      required this.isSelected,
-      required this.onTap,
-      this.dimmed = false});
+
+  /// Cuando no es null, sobrescribe el color del nodo con el estado histórico.
+  final String? snapshotTipo;
+
+  const _FimNode({
+    required this.path,
+    required this.alert,
+    required this.isSelected,
+    required this.onTap,
+    this.dimmed = false,
+    this.snapshotTipo,
+  });
 
   bool get _isDir {
     final last = path.split('/').last;
-    // Solo es fichero si tiene extensión conocida
     final ext = last.contains('.') ? last.split('.').last.toLowerCase() : '';
     const fileExts = {
       'txt',
@@ -257,7 +337,8 @@ class _FimNode extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final tipo = alert?.tipoCambio ?? 'CLEAN';
+    // snapshotTipo tiene prioridad sobre el tipo real del nodo
+    final tipo = snapshotTipo ?? alert?.tipoCambio ?? 'CLEAN';
     final color = eventColor(tipo);
     final size = _isDir ? 52.0 : 44.0;
 
@@ -269,7 +350,7 @@ class _FimNode extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             AnimatedContainer(
-              duration: const Duration(milliseconds: 200),
+              duration: const Duration(milliseconds: 300),
               width: size,
               height: size,
               decoration: BoxDecoration(
@@ -314,6 +395,7 @@ class _FimNode extends StatelessWidget {
 }
 
 // ── Zoom controls ─────────────────────────────────────────────────────────────
+
 class _ZoomControls extends StatelessWidget {
   final VoidCallback onReset, onZoomIn, onZoomOut;
   const _ZoomControls(
@@ -350,7 +432,8 @@ class _ZBtn extends StatelessWidget {
       );
 }
 
-// ── Estados ───────────────────────────────────────────────────────────────────
+// ── Estados de carga ──────────────────────────────────────────────────────────
+
 class _LoadingView extends StatelessWidget {
   const _LoadingView();
   @override

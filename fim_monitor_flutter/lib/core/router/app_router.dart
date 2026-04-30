@@ -3,6 +3,7 @@ import 'package:go_router/go_router.dart';
 import '../../presentation/pages/splash_page.dart';
 import '../../presentation/pages/home_page.dart';
 import '../../presentation/pages/settings_page.dart';
+import '../../presentation/blocs/timeline/timeline_bloc.dart';
 
 class AppRouter {
   AppRouter._();

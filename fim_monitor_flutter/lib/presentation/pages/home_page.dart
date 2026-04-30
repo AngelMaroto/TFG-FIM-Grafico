@@ -9,6 +9,7 @@ import '../blocs/connection/connection_bloc.dart';
 import '../blocs/graph/graph_bloc.dart';
 import '../blocs/timeline/timeline_bloc.dart';
 import '../widgets/graph/fim_graph_widget.dart';
+import '../pages/timeline_page.dart';
 
 class HomePage extends StatelessWidget {
   const HomePage({super.key});
@@ -17,9 +18,13 @@ class HomePage extends StatelessWidget {
   Widget build(BuildContext context) {
     return MultiBlocProvider(
       providers: [
-        BlocProvider(create: (_) => sl<ConnectionBloc>()..add(ConnectRequested())),
-        BlocProvider(create: (_) => sl<GraphBloc>()..add(const GraphLoadRequested())),
-        BlocProvider(create: (_) => sl<TimelineBloc>()..add(const TimelineLoadRequested())),
+        BlocProvider(
+            create: (_) => sl<ConnectionBloc>()..add(ConnectRequested())),
+        BlocProvider(
+            create: (_) => sl<GraphBloc>()..add(const GraphLoadRequested())),
+        BlocProvider(
+            create: (_) =>
+                sl<TimelineBloc>()..add(const TimelineLoadRequested())),
       ],
       child: const _HomeView(),
     );
@@ -43,17 +48,27 @@ class _HomeView extends StatelessWidget {
           BlocBuilder<ConnectionBloc, ConnectionState>(
             builder: (context, state) {
               final (color, label) = switch (state) {
-                ConnectionConnected()    => (AppColors.eventClean,    'Conectado'),
-                ConnectionConnecting()   => (AppColors.eventModified, 'Conectando…'),
-                ConnectionDisconnected() => (AppColors.textDisabled,  'Desconectado'),
-                ConnectionError()        => (AppColors.eventDeleted,  'Error WS'),
-                _                        => (AppColors.textDisabled,  '—'),
+                ConnectionConnected() => (AppColors.eventClean, 'Conectado'),
+                ConnectionConnecting() => (
+                    AppColors.eventModified,
+                    'Conectando…'
+                  ),
+                ConnectionDisconnected() => (
+                    AppColors.textDisabled,
+                    'Desconectado'
+                  ),
+                ConnectionError() => (AppColors.eventDeleted, 'Error WS'),
+                _ => (AppColors.textDisabled, '—'),
               };
               return Row(children: [
-                Container(width: 7, height: 7,
-                    decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
+                Container(
+                    width: 7,
+                    height: 7,
+                    decoration:
+                        BoxDecoration(color: color, shape: BoxShape.circle)),
                 const SizedBox(width: 6),
-                Text(label, style: AppTextStyles.bodySmall.copyWith(color: color)),
+                Text(label,
+                    style: AppTextStyles.bodySmall.copyWith(color: color)),
               ]);
             },
           ),
@@ -72,7 +87,7 @@ class _HomeView extends StatelessWidget {
   }
 }
 
-// ── Desktop: grafo izquierda + timeline derecha (stub) ────────────────────────
+// ── Desktop: grafo izquierda + timeline derecha ───────────────────────────────
 class _DesktopLayout extends StatelessWidget {
   const _DesktopLayout();
 
@@ -81,17 +96,9 @@ class _DesktopLayout extends StatelessWidget {
     return Row(children: [
       const Expanded(flex: 6, child: FimGraphWidget()),
       VerticalDivider(width: 1, color: AppColors.border),
-      Expanded(
+      const Expanded(
         flex: 4,
-        child: Center(
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-            Icon(Icons.timeline_outlined, size: 40, color: AppColors.border),
-            const SizedBox(height: 12),
-            Text('Línea Temporal', style: AppTextStyles.titleMedium),
-            const SizedBox(height: 4),
-            Text('Próxima iteración', style: AppTextStyles.bodySmall),
-          ]),
-        ),
+        child: TimelineScreen(), // ← SUSTITUIDO
       ),
     ]);
   }
@@ -113,13 +120,13 @@ class _MobileLayout extends StatelessWidget {
           indicatorSize: TabBarIndicatorSize.label,
           tabs: const [
             Tab(icon: Icon(Icons.account_tree_outlined), text: 'Grafo'),
-            Tab(icon: Icon(Icons.timeline_outlined),     text: 'Timeline'),
+            Tab(icon: Icon(Icons.timeline_outlined), text: 'Timeline'),
           ],
         ),
         const Expanded(
           child: TabBarView(children: [
             FimGraphWidget(),
-            Center(child: Text('Línea Temporal — próxima iteración')),
+            TimelineScreen(), // ← SUSTITUIDO
           ]),
         ),
       ]),

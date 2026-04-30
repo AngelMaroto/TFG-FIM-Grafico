@@ -63,13 +63,29 @@ public class FimController {
         return ResponseEntity.ok(fimService.getAllAlertas());
     }
 
-    // GET /api/status
+
+    // GET /api/status — estado del sistema para la pantalla de ajustes
     @GetMapping("/status")
     public ResponseEntity<Map<String, Object>> getStatus() {
+        List<Scan> scans = fimService.getAllScans();
+        List<Alert> events = fimService.getAllAlertas();
+
+        // Último escaneo
+        String ultimoScan = scans.isEmpty() ? null :
+                scans.get(scans.size() - 1).getFechaEjecucion().toString();
+
+        // Hostname del servidor
+        String hostname = "desconocido";
+        try {
+            hostname = java.net.InetAddress.getLocalHost().getHostName();
+        } catch (Exception ignored) {}
+
         return ResponseEntity.ok(Map.of(
-                "status", "running",
-                "scans",  fimService.getAllScans().size(),
-                "events", fimService.getAllAlertas().size()
+                "status",     "running",
+                "scans",      scans.size(),
+                "events",     events.size(),
+                "ultimoScan", ultimoScan != null ? ultimoScan : "Sin escaneos",
+                "hostname",   hostname
         ));
     }
 }

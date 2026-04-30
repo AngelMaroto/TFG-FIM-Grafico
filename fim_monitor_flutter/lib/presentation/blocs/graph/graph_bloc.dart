@@ -1,11 +1,17 @@
 // lib/presentation/blocs/graph/graph_bloc.dart
+//
+// FIX: todos los filtros (tipo, severidad, búsqueda, ruta) son LOCALES.
+// Ningún filtro dispara HTTP ni GraphLoading. Solo GraphLoadRequested
+// hace HTTP (arranque y reconexión). El widget filtra sobre nodeMap completo.
+//
 import 'dart:async';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:equatable/equatable.dart';
 import '../../../data/models/alert_model.dart';
 import '../../../domain/repositories/fim_repository.dart';
 
-// ── Eventos ──────────────────────────────────────────────────────────────────
+// ── Eventos ───────────────────────────────────────────────────────────────────
+
 abstract class GraphEvent extends Equatable {
   const GraphEvent();
   @override
@@ -13,11 +19,7 @@ abstract class GraphEvent extends Equatable {
 }
 
 class GraphLoadRequested extends GraphEvent {
-  final String? filterTipo;
-  final String? filterRuta;
-  const GraphLoadRequested({this.filterTipo, this.filterRuta});
-  @override
-  List<Object?> get props => [filterTipo, filterRuta];
+  const GraphLoadRequested();
 }
 
 class GraphFilterChanged extends GraphEvent {
@@ -45,18 +47,15 @@ class GraphNodeSelected extends GraphEvent {
   List<Object?> get props => [ruta];
 }
 
-/// Nuevo evento: el slider temporal del TimelineBloc cambió de snapshot.
-/// Recibe el mapa rutaArchivo→tipoCambio del snapshot seleccionado para
-/// sobrescribir temporalmente los colores del grafo sin hacer HTTP.
 class GraphSnapshotApplied extends GraphEvent {
-  /// null = volver al estado en vivo (último snapshot)
   final Map<String, String?>? snapshotStates;
   const GraphSnapshotApplied(this.snapshotStates);
   @override
   List<Object?> get props => [snapshotStates];
 }
 
-// ── Estados ──────────────────────────────────────────────────────────────────
+// ── Estados ───────────────────────────────────────────────────────────────────
+
 abstract class GraphState extends Equatable {
   const GraphState();
   @override
@@ -68,15 +67,13 @@ class GraphInitial extends GraphState {}
 class GraphLoading extends GraphState {}
 
 class GraphLoaded extends GraphState {
+  // nodeMap COMPLETO — el widget aplica filtros localmente sobre este mapa
   final Map<String, AlertModel> nodeMap;
   final String? selectedRuta;
   final String? filterTipo;
   final String? filterRuta;
   final String? filterSeveridad;
   final String? searchQuery;
-
-  /// Cuando no es null, el grafo muestra este mapa en lugar de nodeMap.
-  /// Es el estado histórico del snapshot seleccionado en la timeline.
   final Map<String, String?>? snapshotOverride;
 
   const GraphLoaded({
@@ -92,33 +89,30 @@ class GraphLoaded extends GraphState {
   GraphLoaded copyWith({
     Map<String, AlertModel>? nodeMap,
     String? selectedRuta,
-    Object? filterTipo = _sentinel,
-    Object? filterRuta = _sentinel,
-    Object? filterSeveridad = _sentinel,
-    Object? searchQuery = _sentinel,
-    Object? snapshotOverride = _sentinel,
+    Object? filterTipo = _s,
+    Object? filterRuta = _s,
+    Object? filterSeveridad = _s,
+    Object? searchQuery = _s,
+    Object? snapshotOverride = _s,
     bool clearSelection = false,
   }) =>
       GraphLoaded(
         nodeMap: nodeMap ?? this.nodeMap,
         selectedRuta:
             clearSelection ? null : (selectedRuta ?? this.selectedRuta),
-        filterTipo:
-            filterTipo == _sentinel ? this.filterTipo : filterTipo as String?,
-        filterRuta:
-            filterRuta == _sentinel ? this.filterRuta : filterRuta as String?,
-        filterSeveridad: filterSeveridad == _sentinel
+        filterTipo: filterTipo == _s ? this.filterTipo : filterTipo as String?,
+        filterRuta: filterRuta == _s ? this.filterRuta : filterRuta as String?,
+        filterSeveridad: filterSeveridad == _s
             ? this.filterSeveridad
             : filterSeveridad as String?,
-        searchQuery: searchQuery == _sentinel
-            ? this.searchQuery
-            : searchQuery as String?,
-        snapshotOverride: snapshotOverride == _sentinel
+        searchQuery:
+            searchQuery == _s ? this.searchQuery : searchQuery as String?,
+        snapshotOverride: snapshotOverride == _s
             ? this.snapshotOverride
             : snapshotOverride as Map<String, String?>?,
       );
 
-  static const _sentinel = Object();
+  static const _s = Object();
 
   @override
   List<Object?> get props => [
@@ -140,6 +134,7 @@ class GraphError extends GraphState {
 }
 
 // ── BLoC ─────────────────────────────────────────────────────────────────────
+
 class GraphBloc extends Bloc<GraphEvent, GraphState> {
   final FimRepository _repo;
   StreamSubscription<AlertModel>? _liveAlertSub;
@@ -158,11 +153,8 @@ class GraphBloc extends Bloc<GraphEvent, GraphState> {
     _liveAlertSub = null;
     emit(GraphLoading());
     try {
-      final alerts = await _repo.fetchAlerts(
-        tipo: event.filterTipo,
-        ruta: event.filterRuta,
-        limit: 500,
-      );
+      // Carga TODO sin filtros — filtrado local en el widget
+      final alerts = await _repo.fetchAlerts(limit: 500);
 
       final nodeMap = <String, AlertModel>{};
       for (final a in alerts) {
@@ -175,13 +167,8 @@ class GraphBloc extends Bloc<GraphEvent, GraphState> {
         }
       }
 
-      emit(GraphLoaded(
-        nodeMap: nodeMap,
-        filterTipo: event.filterTipo,
-        filterRuta: event.filterRuta,
-      ));
+      emit(GraphLoaded(nodeMap: nodeMap));
 
-      await _liveAlertSub?.cancel();
       _liveAlertSub = _repo.liveAlerts.listen(
         (alert) => add(_GraphLiveAlertReceived(alert)),
       );
@@ -190,21 +177,15 @@ class GraphBloc extends Bloc<GraphEvent, GraphState> {
     }
   }
 
+  // Filtros → solo emit, CERO HTTP
   void _onFilterChanged(GraphFilterChanged event, Emitter<GraphState> emit) {
     final current = state;
-    if (current is GraphLoaded) {
-      if (event.tipo == current.filterTipo &&
-          event.ruta == current.filterRuta) {
-        emit(current.copyWith(
-          filterSeveridad: event.severidad,
-          searchQuery: event.searchQuery,
-        ));
-        return;
-      }
-    }
-    add(GraphLoadRequested(
+    if (current is! GraphLoaded) return;
+    emit(current.copyWith(
       filterTipo: event.tipo,
       filterRuta: event.ruta,
+      filterSeveridad: event.severidad,
+      searchQuery: event.searchQuery,
     ));
   }
 
@@ -212,10 +193,8 @@ class GraphBloc extends Bloc<GraphEvent, GraphState> {
     final current = state;
     if (current is! GraphLoaded) return;
     if (event.alert.rutaArchivo == null) return;
-
     final updated = Map<String, AlertModel>.from(current.nodeMap);
     updated[event.alert.rutaArchivo!] = event.alert;
-    // Al llegar un evento live, limpiar el override (volver a en vivo)
     emit(current.copyWith(nodeMap: updated, snapshotOverride: null));
   }
 
@@ -225,8 +204,6 @@ class GraphBloc extends Bloc<GraphEvent, GraphState> {
     emit(current.copyWith(selectedRuta: event.ruta));
   }
 
-  /// Aplica el snapshot del slider: sobrescribe los colores sin HTTP.
-  /// snapshotStates == null → volver al estado en vivo.
   void _onSnapshotApplied(
       GraphSnapshotApplied event, Emitter<GraphState> emit) {
     final current = state;

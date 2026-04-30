@@ -17,9 +17,10 @@ class _TimelineScreenState extends State<TimelineScreen> {
   final ScrollController _scrollController = ScrollController();
   final TextEditingController _rutaController = TextEditingController();
 
-  final _tipoNotifier = ValueNotifier<String?>(null);
-  final _severidadNotifier = ValueNotifier<String?>(null);
-  final _rangoNotifier = ValueNotifier<DateTimeRange?>(null);
+  // Filtros como estado — setState() garantiza rebuild de la lista
+  String? _filterTipo;
+  String? _filterSeveridad;
+  DateTimeRange? _filterRango;
 
   static const _tipos = ['NEW', 'DELETED', 'MODIFIED', 'PERMISSIONS'];
   static const _severidades = ['ALTA', 'MEDIA', 'BAJA'];
@@ -35,9 +36,6 @@ class _TimelineScreenState extends State<TimelineScreen> {
   void dispose() {
     _scrollController.dispose();
     _rutaController.dispose();
-    _tipoNotifier.dispose();
-    _severidadNotifier.dispose();
-    _rangoNotifier.dispose();
     super.dispose();
   }
 
@@ -49,9 +47,9 @@ class _TimelineScreenState extends State<TimelineScreen> {
   }
 
   void _aplicarFiltros() {
-    final rango = _rangoNotifier.value;
+    // Solo ruta y fechas van al BLoC (HTTP). Tipo y severidad son locales.
+    final rango = _filterRango;
     context.read<TimelineBloc>().add(TimelineLoadRequested(
-          tipo: _tipoNotifier.value,
           ruta: _rutaController.text.isEmpty ? null : _rutaController.text,
           desde: rango != null
               ? DateFormat('yyyy-MM-dd').format(rango.start)
@@ -62,9 +60,11 @@ class _TimelineScreenState extends State<TimelineScreen> {
   }
 
   void _limpiarFiltros() {
-    _tipoNotifier.value = null;
-    _severidadNotifier.value = null;
-    _rangoNotifier.value = null;
+    setState(() {
+      _filterTipo = null;
+      _filterSeveridad = null;
+      _filterRango = null;
+    });
     _rutaController.clear();
     context.read<TimelineBloc>().add(const TimelineLoadRequested());
   }
@@ -74,7 +74,7 @@ class _TimelineScreenState extends State<TimelineScreen> {
       context: context,
       firstDate: DateTime(2024),
       lastDate: DateTime.now(),
-      initialDateRange: _rangoNotifier.value,
+      initialDateRange: _filterRango,
       builder: (ctx, child) => Theme(
         data: Theme.of(ctx).copyWith(
           colorScheme: ColorScheme.dark(
@@ -86,7 +86,7 @@ class _TimelineScreenState extends State<TimelineScreen> {
       ),
     );
     if (picked != null) {
-      _rangoNotifier.value = picked;
+      setState(() => _filterRango = picked);
       _aplicarFiltros();
     }
   }
@@ -118,13 +118,9 @@ class _TimelineScreenState extends State<TimelineScreen> {
           _buildFilterBar(),
           Expanded(
             child: BlocBuilder<TimelineBloc, TimelineState>(
-              buildWhen: (prev, curr) {
-                if (prev is TimelineLoaded && curr is TimelineLoaded) {
-                  return prev.alerts != curr.alerts ||
-                      prev.hasMore != curr.hasMore;
-                }
-                return true;
-              },
+              // Sin buildWhen restrictivo: los filtros locales necesitan
+              // que el builder se ejecute cuando cambia setState también.
+              // BlocBuilder ya es eficiente por equatable.
               builder: (context, state) {
                 if (state is TimelineLoading) return _buildLoading();
                 if (state is TimelineError) return _buildError(state.message);
@@ -248,108 +244,92 @@ class _TimelineScreenState extends State<TimelineScreen> {
           Row(
             children: [
               Expanded(
-                child: ValueListenableBuilder<String?>(
-                  valueListenable: _tipoNotifier,
-                  builder: (_, tipo, __) => _DropdownFiltro(
-                    hint: 'Tipo',
-                    value: tipo,
-                    items: _tipos,
-                    icon: Icons.category_outlined,
-                    colorMap: _colorPorTipo,
-                    onChanged: (v) {
-                      _tipoNotifier.value = v;
-                      _aplicarFiltros();
-                    },
-                  ),
+                child: _DropdownFiltro(
+                  hint: 'Tipo',
+                  value: _filterTipo,
+                  items: _tipos,
+                  icon: Icons.category_outlined,
+                  colorMap: _colorPorTipo,
+                  onChanged: (v) => setState(() => _filterTipo = v),
                 ),
               ),
               const SizedBox(width: 8),
               Expanded(
-                child: ValueListenableBuilder<String?>(
-                  valueListenable: _severidadNotifier,
-                  builder: (_, sev, __) => _DropdownFiltro(
-                    hint: 'Severidad',
-                    value: sev,
-                    items: _severidades,
-                    icon: Icons.warning_amber_outlined,
-                    colorMap: _colorPorSeveridad,
-                    onChanged: (v) => _severidadNotifier.value = v,
-                  ),
+                child: _DropdownFiltro(
+                  hint: 'Severidad',
+                  value: _filterSeveridad,
+                  items: _severidades,
+                  icon: Icons.warning_amber_outlined,
+                  colorMap: _colorPorSeveridad,
+                  onChanged: (v) => setState(() => _filterSeveridad = v),
                 ),
               ),
               const SizedBox(width: 8),
-              ValueListenableBuilder<DateTimeRange?>(
-                valueListenable: _rangoNotifier,
-                builder: (_, rango, __) => GestureDetector(
-                  onTap: _seleccionarRango,
-                  child: Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                    decoration: BoxDecoration(
-                      color: rango != null
-                          ? const Color(0xFF00D4FF).withOpacity(0.15)
-                          : const Color(0xFF1A2030),
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(
-                        color: rango != null
-                            ? const Color(0xFF00D4FF).withOpacity(0.5)
-                            : const Color(0xFF2A3350),
-                      ),
+              GestureDetector(
+                onTap: _seleccionarRango,
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: _filterRango != null
+                        ? const Color(0xFF00D4FF).withOpacity(0.15)
+                        : const Color(0xFF1A2030),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(
+                      color: _filterRango != null
+                          ? const Color(0xFF00D4FF).withOpacity(0.5)
+                          : const Color(0xFF2A3350),
                     ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(Icons.date_range,
-                            size: 16,
-                            color: rango != null
-                                ? const Color(0xFF00D4FF)
-                                : const Color(0xFF6B7A99)),
-                        const SizedBox(width: 6),
-                        Text(
-                          rango != null
-                              ? '${DateFormat('dd/MM').format(rango.start)} – ${DateFormat('dd/MM').format(rango.end)}'
-                              : 'Fechas',
-                          style: TextStyle(
-                            color: rango != null
-                                ? const Color(0xFF00D4FF)
-                                : const Color(0xFF6B7A99),
-                            fontSize: 12,
-                            fontWeight: FontWeight.w500,
-                          ),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.date_range,
+                          size: 16,
+                          color: _filterRango != null
+                              ? const Color(0xFF00D4FF)
+                              : const Color(0xFF6B7A99)),
+                      const SizedBox(width: 6),
+                      Text(
+                        _filterRango != null
+                            ? '${DateFormat('dd/MM').format(_filterRango!.start)} – ${DateFormat('dd/MM').format(_filterRango!.end)}'
+                            : 'Fechas',
+                        style: TextStyle(
+                          color: _filterRango != null
+                              ? const Color(0xFF00D4FF)
+                              : const Color(0xFF6B7A99),
+                          fontSize: 12,
+                          fontWeight: FontWeight.w500,
                         ),
-                      ],
-                    ),
+                      ),
+                    ],
                   ),
                 ),
               ),
-              ValueListenableBuilder<String?>(
-                valueListenable: _tipoNotifier,
-                builder: (_, tipo, __) =>
-                    ValueListenableBuilder<DateTimeRange?>(
-                  valueListenable: _rangoNotifier,
-                  builder: (_, rango, __) {
-                    final hayFiltros = tipo != null ||
-                        rango != null ||
-                        _rutaController.text.isNotEmpty;
-                    if (!hayFiltros) return const SizedBox.shrink();
-                    return Padding(
-                      padding: const EdgeInsets.only(left: 8),
-                      child: GestureDetector(
-                        onTap: _limpiarFiltros,
-                        child: Container(
-                          padding: const EdgeInsets.all(8),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFF2A1A1A),
-                            borderRadius: BorderRadius.circular(8),
-                            border: Border.all(color: const Color(0xFF4A2020)),
-                          ),
-                          child: const Icon(Icons.close,
-                              size: 16, color: Color(0xFFFF6B6B)),
+              Builder(
+                builder: (_) {
+                  final hayFiltros = _filterTipo != null ||
+                      _filterSeveridad != null ||
+                      _filterRango != null ||
+                      _rutaController.text.isNotEmpty;
+                  if (!hayFiltros) return const SizedBox.shrink();
+                  return Padding(
+                    padding: const EdgeInsets.only(left: 8),
+                    child: GestureDetector(
+                      onTap: _limpiarFiltros,
+                      child: Container(
+                        padding: const EdgeInsets.all(8),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF2A1A1A),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: const Color(0xFF4A2020)),
                         ),
+                        child: const Icon(Icons.close,
+                            size: 16, color: Color(0xFFFF6B6B)),
                       ),
-                    );
-                  },
-                ),
+                    ),
+                  );
+                },
               ),
             ],
           ),
@@ -390,11 +370,20 @@ class _TimelineScreenState extends State<TimelineScreen> {
 
   // ── Timeline list ─────────────────────────────────────────────────────────
 
+  // Filtra combinando tipo, severidad y búsqueda de ruta localmente
+  List<AlertModel> _applyLocalFilters(List<AlertModel> alerts) {
+    return alerts.where((a) {
+      if (_filterTipo != null && a.tipoCambio != _filterTipo) return false;
+      if (_filterSeveridad != null &&
+          a.severidad.toUpperCase() != _filterSeveridad!.toUpperCase()) {
+        return false;
+      }
+      return true;
+    }).toList();
+  }
+
   Widget _buildTimeline(TimelineLoaded state) {
-    final sev = _severidadNotifier.value;
-    final alerts = sev != null
-        ? state.alerts.where((a) => a.severidad == sev).toList()
-        : state.alerts;
+    final alerts = _applyLocalFilters(state.alerts);
 
     if (alerts.isEmpty) return _buildEmpty();
 

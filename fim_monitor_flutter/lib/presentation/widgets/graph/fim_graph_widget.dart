@@ -1,13 +1,515 @@
 // lib/presentation/widgets/graph/fim_graph_widget.dart
+//
+// CustomPainter puro — sin graphview ni BuchheimWalker.
+//
+// CAMBIOS v2:
+//   • Fondo de puntos equidistantes (GridDotsPainter) — sutil, estilo Figma.
+//   • Anillo exterior de severidad: ALTA=rojo, MEDIA=naranja, BAJA/CLEAN=gris tenue.
+//   • Iconos de fichero / carpeta dibujados con Path dentro del nodo.
+//   • Labels más grandes (11px) y en negrita (w600).
+//
+// REGLAS DE RENDIMIENTO (sin cambios):
+//   • _ensureLayout() recalcula posiciones solo cuando cambian las RUTAS.
+//   • Filtros y colores NUNCA recalculan el layout.
+//   • AnimatedBuilder sobre TransformationController → solo repinta canvas.
+//
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
-import 'package:graphview/GraphView.dart';
 
 import '../../../core/theme/app_theme.dart';
 import '../../../data/models/alert_model.dart';
 import '../../blocs/graph/graph_bloc.dart';
 import 'node_detail_panel.dart';
 import 'graph_filter_bar.dart';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// COLORES DE SEVERIDAD
+// ─────────────────────────────────────────────────────────────────────────────
+
+Color _severityRingColor(String? sev) {
+  switch (sev?.toUpperCase()) {
+    case 'ALTA':
+      return const Color(0xFFEF4444); // rojo
+    case 'MEDIA':
+      return const Color(0xFFF97316); // naranja
+    case 'BAJA':
+      return const Color(0xFF6B7280); // gris medio
+    default:
+      return const Color(
+          0xFF374151); // gris muy oscuro → prácticamente invisible
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODELO DE LAYOUT  (calculado una sola vez por conjunto de rutas)
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _GNode {
+  final String path;
+  Offset pos;
+  _GNode(this.path, this.pos);
+}
+
+class _GEdge {
+  final int from;
+  final int to;
+  _GEdge(this.from, this.to);
+}
+
+class _GraphLayout {
+  final List<_GNode> nodes;
+  final List<_GEdge> edges;
+  final Size canvasSize;
+
+  _GraphLayout(this.nodes, this.edges, this.canvasSize);
+
+  static _GraphLayout build(Map<String, AlertModel> nodeMap) {
+    const hSep = 110.0;
+    const vSep = 100.0; // algo más de espacio vertical para los anillos
+    const padX = 80.0;
+    const padY = 70.0;
+
+    final allPaths = <String>{'/'};
+    for (final path in nodeMap.keys) {
+      if (path.isEmpty) continue;
+      final parts = path.split('/').where((p) => p.isNotEmpty).toList();
+      String cur = '';
+      for (final p in parts) {
+        cur = '$cur/$p';
+        allPaths.add(cur);
+      }
+    }
+
+    final pathList = allPaths.toList()..sort();
+    final index = <String, int>{};
+    for (int i = 0; i < pathList.length; i++) index[pathList[i]] = i;
+
+    final n = pathList.length;
+    final children = List<List<int>>.generate(n, (_) => []);
+    for (final path in pathList) {
+      if (path == '/') continue;
+      final parts = path.split('/').where((p) => p.isNotEmpty).toList();
+      final parentPath = parts.length == 1
+          ? '/'
+          : '/${parts.sublist(0, parts.length - 1).join('/')}';
+      if (index.containsKey(parentPath)) {
+        final pi = index[parentPath]!;
+        final ci = index[path]!;
+        if (!children[pi].contains(ci)) children[pi].add(ci);
+      }
+    }
+
+    final level = List<int>.filled(n, 0);
+    final rootIdx = index['/']!;
+    final queue = <int>[rootIdx];
+    final visited = List<bool>.filled(n, false);
+    visited[rootIdx] = true;
+    while (queue.isNotEmpty) {
+      final cur = queue.removeAt(0);
+      for (final child in children[cur]) {
+        if (!visited[child]) {
+          visited[child] = true;
+          level[child] = level[cur] + 1;
+          queue.add(child);
+        }
+      }
+    }
+
+    final byLevel = <int, List<int>>{};
+    for (int i = 0; i < n; i++) byLevel.putIfAbsent(level[i], () => []).add(i);
+
+    final positions = List<Offset>.filled(n, Offset.zero);
+    int maxLevel = 0, maxWidth = 0;
+    for (final e in byLevel.entries) {
+      if (e.key > maxLevel) maxLevel = e.key;
+      if (e.value.length > maxWidth) maxWidth = e.value.length;
+      final total = e.value.length;
+      for (int i = 0; i < total; i++) {
+        positions[e.value[i]] =
+            Offset(i * hSep - (total - 1) * hSep / 2.0, e.key * vSep);
+      }
+    }
+
+    double minX = positions.map((o) => o.dx).reduce(math.min);
+    double minY = positions.map((o) => o.dy).reduce(math.min);
+    for (int i = 0; i < n; i++) {
+      positions[i] =
+          Offset(positions[i].dx - minX + padX, positions[i].dy - minY + padY);
+    }
+
+    final w = (maxWidth * hSep + padX * 2).clamp(800.0, 12000.0);
+    final h = (maxLevel * vSep + padY * 2 + 100).clamp(500.0, 8000.0);
+
+    final nodes = List.generate(n, (i) => _GNode(pathList[i], positions[i]));
+    final edges = <_GEdge>[];
+    for (int pi = 0; pi < n; pi++) {
+      for (final ci in children[pi]) edges.add(_GEdge(pi, ci));
+    }
+    return _GraphLayout(nodes, edges, Size(w, h));
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FONDO DE PUNTOS  (se dibuja una sola vez bajo el grafo)
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _DotsBgPainter extends CustomPainter {
+  final Matrix4 transform;
+  const _DotsBgPainter({required this.transform});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    const step = 28.0;
+    const dotR = 1.1;
+    final paint = Paint()..color = const Color(0xFF4B5563).withOpacity(0.35);
+
+    // Extraer traslación y escala del transform para desplazar la cuadrícula
+    final s = transform.storage;
+    final scaleX = s[0];
+    final tx = s[12] % (step * scaleX);
+    final ty = s[13] % (step * scaleX);
+
+    final cols = (size.width / (step * scaleX)).ceil() + 2;
+    final rows = (size.height / (step * scaleX)).ceil() + 2;
+
+    for (int row = -1; row < rows; row++) {
+      for (int col = -1; col < cols; col++) {
+        canvas.drawCircle(
+          Offset(col * step * scaleX + tx, row * step * scaleX + ty),
+          dotR,
+          paint,
+        );
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(_DotsBgPainter old) => old.transform != transform;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PAINTER PRINCIPAL
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _GraphPainter extends CustomPainter {
+  final _GraphLayout layout;
+  final Map<String, AlertModel> nodeMap;
+  final Map<String, String?>? snapshotOverride;
+  final String? filterTipo;
+  final String? filterSeveridad;
+  final String? searchQuery;
+  final String? selectedPath;
+  final String? hoveredPath;
+
+  const _GraphPainter({
+    required this.layout,
+    required this.nodeMap,
+    this.snapshotOverride,
+    this.filterTipo,
+    this.filterSeveridad,
+    this.searchQuery,
+    this.selectedPath,
+    this.hoveredPath,
+  });
+
+  String _tipoFor(String path) {
+    if (snapshotOverride != null) {
+      return snapshotOverride![path] ?? 'CLEAN';
+    }
+    return nodeMap[path]?.tipoCambio ?? 'CLEAN';
+  }
+
+  String? _sevFor(String path) => nodeMap[path]?.severidad;
+
+  Color _colorFor(String path) => eventColor(_tipoFor(path));
+
+  bool _dimmed(String path) {
+    final alert = nodeMap[path];
+    if (filterTipo != null && alert != null) {
+      if (alert.tipoCambio != filterTipo) return true;
+    }
+    if (filterSeveridad != null && alert != null) {
+      if (alert.severidad.toUpperCase() != filterSeveridad!.toUpperCase()) {
+        return true;
+      }
+    }
+    final q = searchQuery?.toLowerCase();
+    if (q != null && q.isNotEmpty) {
+      if (!path.toLowerCase().contains(q)) return true;
+    }
+    return false;
+  }
+
+  bool _isDir(String path) {
+    if (path == '/') return true;
+    final last = path.split('/').last;
+    if (!last.contains('.')) return true;
+    const fileExts = {
+      'txt',
+      'conf',
+      'cfg',
+      'log',
+      'json',
+      'xml',
+      'yaml',
+      'yml',
+      'sh',
+      'py',
+      'dart',
+      'java',
+      'class',
+      'so',
+      'ko',
+      'md',
+      'toml',
+      'ini',
+      'env',
+      'html',
+      'css',
+      'js',
+      'ts',
+    };
+    return !fileExts.contains(last.split('.').last.toLowerCase());
+  }
+
+  // ── Icono carpeta ──────────────────────────────────────────────────────────
+  void _drawFolderIcon(Canvas canvas, Offset center, Color color, double op) {
+    const w = 14.0, h = 11.0;
+    final left = center.dx - w / 2;
+    final top = center.dy - h / 2;
+
+    final paint = Paint()
+      ..color = color.withOpacity(0.9 * op)
+      ..strokeWidth = 1.4
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+
+    // Cuerpo principal
+    final body = Path()
+      ..moveTo(left, top + 3)
+      ..lineTo(left, top + h)
+      ..lineTo(left + w, top + h)
+      ..lineTo(left + w, top + 3)
+      ..close();
+    canvas.drawPath(body, paint);
+
+    // Solapa superior
+    final tab = Path()
+      ..moveTo(left, top + 3)
+      ..lineTo(left + 4, top)
+      ..lineTo(left + 7, top)
+      ..lineTo(left + 7, top + 3);
+    canvas.drawPath(tab, paint);
+  }
+
+  // ── Icono fichero ──────────────────────────────────────────────────────────
+  void _drawFileIcon(Canvas canvas, Offset center, Color color, double op) {
+    const w = 11.0, h = 14.0;
+    final left = center.dx - w / 2;
+    final top = center.dy - h / 2;
+
+    final paint = Paint()
+      ..color = color.withOpacity(0.9 * op)
+      ..strokeWidth = 1.4
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+
+    final fold = 3.5;
+    // Contorno con esquina doblada
+    final body = Path()
+      ..moveTo(left, top)
+      ..lineTo(left + w - fold, top)
+      ..lineTo(left + w, top + fold)
+      ..lineTo(left + w, top + h)
+      ..lineTo(left, top + h)
+      ..close();
+    canvas.drawPath(body, paint);
+
+    // Esquina doblada
+    final corner = Path()
+      ..moveTo(left + w - fold, top)
+      ..lineTo(left + w - fold, top + fold)
+      ..lineTo(left + w, top + fold);
+    canvas.drawPath(corner, paint);
+
+    // Líneas de contenido
+    final linePaint = Paint()
+      ..color = color.withOpacity(0.6 * op)
+      ..strokeWidth = 1.0
+      ..strokeCap = StrokeCap.round;
+    canvas.drawLine(Offset(left + 2, top + h * 0.55),
+        Offset(left + w - 2, top + h * 0.55), linePaint);
+    canvas.drawLine(Offset(left + 2, top + h * 0.73),
+        Offset(left + w - 2, top + h * 0.73), linePaint);
+  }
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    // ── Aristas ──────────────────────────────────────────────────────────────
+    for (final e in layout.edges) {
+      final dimA = _dimmed(layout.nodes[e.from].path);
+      final dimB = _dimmed(layout.nodes[e.to].path);
+      final dim = dimA && dimB;
+      canvas.drawLine(
+        layout.nodes[e.from].pos,
+        layout.nodes[e.to].pos,
+        Paint()
+          ..color = AppColors.border.withOpacity(dim ? 0.08 : 0.45)
+          ..strokeWidth = dim ? 0.5 : 1.0
+          ..style = PaintingStyle.stroke,
+      );
+    }
+
+    // ── Nodos ────────────────────────────────────────────────────────────────
+    for (final node in layout.nodes) {
+      final path = node.path;
+      final color = _colorFor(path);
+      final sev = _sevFor(path);
+      final ringColor = _severityRingColor(sev);
+      final dim = _dimmed(path);
+      final selected = path == selectedPath;
+      final hovered = path == hoveredPath;
+      final isDir = _isDir(path);
+      final radius = isDir ? 20.0 : 16.0;
+      final op = dim ? 0.12 : 1.0;
+
+      // 1. Halo selección / hover
+      if (selected || hovered) {
+        canvas.drawCircle(
+          node.pos,
+          radius + 9,
+          Paint()
+            ..color = color.withOpacity(selected ? 0.25 : 0.12)
+            ..style = PaintingStyle.fill,
+        );
+      }
+
+      // 2. Anillo exterior de severidad (solo si hay severidad y no está atenuado)
+      if (sev != null && !dim) {
+        canvas.drawCircle(
+          node.pos,
+          radius + 5,
+          Paint()
+            ..color = ringColor.withOpacity(0.9)
+            ..strokeWidth = 2.5
+            ..style = PaintingStyle.stroke,
+        );
+      }
+
+      // 3. Separador blanco/oscuro entre anillo y nodo (evita que se fundan)
+      canvas.drawCircle(
+        node.pos,
+        radius + 2,
+        Paint()
+          ..color = const Color(0xFF111827).withOpacity(dim ? 0.0 : 0.8)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 2.0,
+      );
+
+      // 4. Relleno del nodo
+      canvas.drawCircle(
+        node.pos,
+        radius,
+        Paint()
+          ..color = color.withOpacity(0.13 * op)
+          ..style = PaintingStyle.fill,
+      );
+
+      // 5. Borde del nodo (color del tipo de evento)
+      canvas.drawCircle(
+        node.pos,
+        radius,
+        Paint()
+          ..color = color.withOpacity(op)
+          ..strokeWidth = selected ? 2.5 : 1.8
+          ..style = PaintingStyle.stroke,
+      );
+
+      // 6. Icono interior
+      if (isDir) {
+        _drawFolderIcon(canvas, node.pos, color, op);
+      } else {
+        _drawFileIcon(canvas, node.pos, color, op);
+      }
+
+      // 7. Etiqueta — más grande y en negrita
+      final label = path == '/' ? '/' : path.split('/').last;
+      final labelColor = selected
+          ? color.withOpacity(op)
+          : AppColors.textSecondary.withOpacity(dim ? 0.2 : 0.9);
+
+      _paintLabel(
+        canvas,
+        label,
+        Offset(node.pos.dx, node.pos.dy + radius + (sev != null ? 9 : 7)),
+        color: labelColor,
+        bold: selected,
+      );
+    }
+  }
+
+  void _paintLabel(
+    Canvas canvas,
+    String text,
+    Offset topCenter, {
+    required Color color,
+    bool bold = false,
+  }) {
+    final tp = TextPainter(
+      text: TextSpan(
+        text: text,
+        style: TextStyle(
+          color: color,
+          fontSize: 11.0,
+          fontWeight: bold ? FontWeight.w700 : FontWeight.w600,
+          fontFamily: 'monospace',
+          letterSpacing: 0.2,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+      maxLines: 1,
+      ellipsis: '…',
+    )..layout(maxWidth: 96);
+    tp.paint(canvas, topCenter - Offset(tp.width / 2, 0));
+  }
+
+  @override
+  bool shouldRepaint(_GraphPainter old) =>
+      !identical(old.nodeMap, nodeMap) ||
+      old.snapshotOverride != snapshotOverride ||
+      old.filterTipo != filterTipo ||
+      old.filterSeveridad != filterSeveridad ||
+      old.searchQuery != searchQuery ||
+      old.selectedPath != selectedPath ||
+      old.hoveredPath != hoveredPath;
+}
+
+// Aplica zoom/pan al painter sin reconstruir widgets
+class _TransformedPainter extends CustomPainter {
+  final Matrix4 transform;
+  final _GraphPainter inner;
+  _TransformedPainter({required this.transform, required this.inner});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    canvas.save();
+    canvas.transform(transform.storage);
+    inner.paint(canvas, inner.layout.canvasSize);
+    canvas.restore();
+  }
+
+  @override
+  bool shouldRepaint(_TransformedPainter old) =>
+      old.transform != transform || inner.shouldRepaint(old.inner);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WIDGET PRINCIPAL
+// ─────────────────────────────────────────────────────────────────────────────
 
 class FimGraphWidget extends StatefulWidget {
   const FimGraphWidget({super.key});
@@ -16,16 +518,11 @@ class FimGraphWidget extends StatefulWidget {
 }
 
 class _FimGraphWidgetState extends State<FimGraphWidget> {
-  final Graph _graph = Graph()..isTree = true;
-  final BuchheimWalkerConfiguration _config = BuchheimWalkerConfiguration()
-    ..siblingSeparation = 40
-    ..levelSeparation = 60
-    ..subtreeSeparation = 40
-    ..orientation = BuchheimWalkerConfiguration.ORIENTATION_TOP_BOTTOM;
+  _GraphLayout? _layout;
+  String _lastStructureKey = '';
 
   final TransformationController _transformCtrl = TransformationController();
-  final Map<String, AlertModel> _nodeAlerts = {};
-  Map<String, AlertModel>? _lastNodeMap;
+  String? _hoveredPath;
 
   @override
   void dispose() {
@@ -33,90 +530,74 @@ class _FimGraphWidgetState extends State<FimGraphWidget> {
     super.dispose();
   }
 
-  void _rebuildGraph(Map<String, AlertModel> nodeMap) {
-    if (nodeMap == _lastNodeMap) return;
-    _lastNodeMap = nodeMap;
-    _graph.nodes.clear();
-    _graph.edges.clear();
-    _nodeAlerts.clear();
+  void _ensureLayout(Map<String, AlertModel> nodeMap) {
+    final key = (nodeMap.keys.toList()..sort()).join('|');
+    if (key == _lastStructureKey && _layout != null) return;
+    _lastStructureKey = key;
+    _layout = _GraphLayout.build(nodeMap);
+  }
 
-    final Map<String, Node> nodes = {};
+  double _currentScale() {
+    final s = _transformCtrl.value.storage;
+    return math.sqrt(s[0] * s[0] + s[1] * s[1]);
+  }
 
-    Node getOrCreate(String path) {
-      if (nodes.containsKey(path)) return nodes[path]!;
-      final n = Node.Id(path);
-      nodes[path] = n;
-      _graph.addNode(n);
-      return n;
+  void _applyScaleAt(double scale, Offset? focal) {
+    final newScale = _currentScale() * scale;
+    if (newScale < 0.12 || newScale > 3.5) return;
+    final m = _transformCtrl.value.clone();
+    if (focal != null) {
+      m
+        ..translate(focal.dx, focal.dy)
+        ..scale(scale, scale)
+        ..translate(-focal.dx, -focal.dy);
+    } else {
+      m.scale(scale, scale);
     }
-
-    getOrCreate('/');
-    _nodeAlerts['/'] = AlertModel(
-      id: -1,
-      tipoCambio: 'CLEAN',
-      severidad: 'BAJA',
-      rutaArchivo: '/',
-    );
-
-    for (final entry in nodeMap.entries) {
-      final path = entry.key;
-      final alert = entry.value;
-      _nodeAlerts[path] = alert;
-
-      final parts = path.split('/').where((p) => p.isNotEmpty).toList();
-      String current = '';
-      for (int i = 0; i < parts.length; i++) {
-        final parent = current.isEmpty ? '/' : current;
-        current = '$current/${parts[i]}';
-        getOrCreate(current);
-        if (!_nodeAlerts.containsKey(current)) {
-          _nodeAlerts[current] = AlertModel(
-            id: -1,
-            tipoCambio: 'CLEAN',
-            severidad: 'BAJA',
-            rutaArchivo: current,
-          );
-        }
-        _graph.addEdge(getOrCreate(parent), getOrCreate(current));
-      }
-    }
+    _transformCtrl.value = m;
   }
 
   void _resetZoom() =>
-      _transformCtrl.value = Matrix4.identity()..translate(50.0, 80.0);
+      _transformCtrl.value = Matrix4.identity()..translate(20.0, 20.0);
+  void _zoomIn() => _applyScaleAt(1.2, null);
+  void _zoomOut() => _applyScaleAt(1 / 1.2, null);
 
-  void _zoomIn() {
-    final m = _transformCtrl.value.clone();
-    m.scale(1.15, 1.15);
-    _transformCtrl.value = m;
+  Offset _toCanvas(Offset screen) {
+    final s = _transformCtrl.value.storage;
+    return Offset((screen.dx - s[12]) / s[0], (screen.dy - s[13]) / s[5]);
   }
 
-  void _zoomOut() {
-    final m = _transformCtrl.value.clone();
-    m.scale(0.87, 0.87);
-    _transformCtrl.value = m;
+  String? _hitTest(Offset cp) {
+    if (_layout == null) return null;
+    String? best;
+    double bestDist = double.infinity;
+    for (final node in _layout!.nodes) {
+      final hitR = (node.path == '/' ? 20.0 : 16.0) + 12.0;
+      final d = (node.pos - cp).distance;
+      if (d <= hitR && d < bestDist) {
+        bestDist = d;
+        best = node.path;
+      }
+    }
+    return best;
   }
 
   @override
   Widget build(BuildContext context) {
     return BlocConsumer<GraphBloc, GraphState>(
-      // Reconstruir el grafo (layout) solo cuando cambia nodeMap,
-      // NO cuando solo cambia snapshotOverride (eso solo repinta colores).
       listenWhen: (p, c) {
-        if (p is GraphLoaded && c is GraphLoaded) {
-          return p.nodeMap != c.nodeMap;
-        }
+        if (p is GraphLoaded && c is GraphLoaded) return p.nodeMap != c.nodeMap;
         return c is GraphLoaded;
       },
-      listener: (context, state) {
-        if (state is GraphLoaded) setState(() => _rebuildGraph(state.nodeMap));
+      listener: (_, state) {
+        if (state is GraphLoaded) setState(() => _ensureLayout(state.nodeMap));
       },
-      // buildWhen incluye snapshotOverride para repintar colores
       buildWhen: (p, c) =>
           c is! GraphLoaded ||
           p is! GraphLoaded ||
           p.nodeMap != c.nodeMap ||
           p.selectedRuta != c.selectedRuta ||
+          p.filterTipo != c.filterTipo ||
           p.filterSeveridad != c.filterSeveridad ||
           p.searchQuery != c.searchQuery ||
           p.snapshotOverride != c.snapshotOverride,
@@ -130,23 +611,11 @@ class _FimGraphWidgetState extends State<FimGraphWidget> {
   }
 
   Widget _buildLoaded(BuildContext context, GraphLoaded state) {
-    final filteredMap = Map.fromEntries(
-      state.nodeMap.entries.where((e) {
-        final alert = e.value;
-        final q = state.searchQuery?.toLowerCase();
-        final matchSearch =
-            q == null || q.isEmpty || e.key.toLowerCase().contains(q);
-        final matchSev = state.filterSeveridad == null ||
-            alert.severidad.toUpperCase() ==
-                state.filterSeveridad!.toUpperCase();
-        return matchSearch && matchSev;
-      }),
-    );
-    _rebuildGraph(filteredMap);
+    _ensureLayout(state.nodeMap);
+    final layout = _layout!;
 
     return Column(
       children: [
-        // Banner de "viaje en el tiempo" cuando el slider no está en vivo
         if (state.snapshotOverride != null)
           _SnapshotBanner(
             onLive: () =>
@@ -173,95 +642,198 @@ class _FimGraphWidgetState extends State<FimGraphWidget> {
         Expanded(
           child: Stack(
             children: [
-              InteractiveViewer(
-                constrained: false,
-                transformationController: _transformCtrl,
-                minScale: 0.2,
-                maxScale: 2.0,
-                scaleFactor: 800,
-                boundaryMargin: const EdgeInsets.all(500),
-                trackpadScrollCausesScale: true,
-                child: GraphView(
-                  graph: _graph,
-                  algorithm: BuchheimWalkerAlgorithm(
-                      _config, TreeEdgeRenderer(_config)),
-                  paint: Paint()
-                    ..color = AppColors.border
-                    ..strokeWidth = 1.0
-                    ..style = PaintingStyle.stroke,
-                  builder: (Node node) {
-                    final path = node.key!.value as String;
-                    final alert = _nodeAlerts[path];
-                    final q = state.searchQuery?.toLowerCase();
-                    final dimmed = q != null &&
-                        q.isNotEmpty &&
-                        !path.toLowerCase().contains(q);
-
-                    // Si hay snapshot activo, obtener el tipoCambio histórico
-                    // para este nodo. Si no aparece en el snapshot = CLEAN.
-                    final snapshotTipo = state.snapshotOverride != null
-                        ? (state.snapshotOverride![path] ?? 'CLEAN')
-                        : null;
-
-                    return _FimNode(
-                      path: path,
-                      alert: alert,
-                      isSelected: state.selectedRuta == path,
-                      dimmed: dimmed,
-                      // snapshotTipo sobrescribe el color del nodo cuando
-                      // el slider no está en la posición de en vivo
-                      snapshotTipo: snapshotTipo,
-                      onTap: () => context
-                          .read<GraphBloc>()
-                          .add(GraphNodeSelected(path)),
-                    );
-                  },
+              // ── Fondo de puntos (se actualiza con el transform para paralaje) ──
+              AnimatedBuilder(
+                animation: _transformCtrl,
+                builder: (_, __) => CustomPaint(
+                  size: Size.infinite,
+                  painter: _DotsBgPainter(transform: _transformCtrl.value),
                 ),
               ),
+
+              // ── Grafo ───────────────────────────────────────────────────────
+              Listener(
+                onPointerSignal: (event) {
+                  if (event is PointerScrollEvent) {
+                    _applyScaleAt(event.scrollDelta.dy < 0 ? 1.1 : 1 / 1.1,
+                        event.localPosition);
+                  }
+                },
+                child: GestureDetector(
+                  onPanUpdate: (d) {
+                    _transformCtrl.value = _transformCtrl.value.clone()
+                      ..translate(d.delta.dx, d.delta.dy);
+                  },
+                  onTapUp: (d) {
+                    final hit = _hitTest(_toCanvas(d.localPosition));
+                    if (hit != null) {
+                      context.read<GraphBloc>().add(GraphNodeSelected(hit));
+                    }
+                  },
+                  child: MouseRegion(
+                    cursor: _hoveredPath != null
+                        ? SystemMouseCursors.click
+                        : MouseCursor.defer,
+                    onHover: (e) {
+                      final hit = _hitTest(_toCanvas(e.localPosition));
+                      if (hit != _hoveredPath)
+                        setState(() => _hoveredPath = hit);
+                    },
+                    onExit: (_) {
+                      if (_hoveredPath != null)
+                        setState(() => _hoveredPath = null);
+                    },
+                    child: ClipRect(
+                      child: AnimatedBuilder(
+                        animation: _transformCtrl,
+                        builder: (_, __) => CustomPaint(
+                          size: Size.infinite,
+                          painter: _TransformedPainter(
+                            transform: _transformCtrl.value,
+                            inner: _GraphPainter(
+                              layout: layout,
+                              nodeMap: state.nodeMap,
+                              snapshotOverride: state.snapshotOverride,
+                              filterTipo: state.filterTipo,
+                              filterSeveridad: state.filterSeveridad,
+                              searchQuery: state.searchQuery,
+                              selectedPath: state.selectedRuta,
+                              hoveredPath: _hoveredPath,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+
+              // ── Leyenda de severidad ────────────────────────────────────────
+              Positioned(
+                left: 12,
+                bottom: 12,
+                child: const _SeverityLegend(),
+              ),
+
+              // ── Controles de zoom ───────────────────────────────────────────
               Positioned(
                 right: 12,
                 bottom: 12,
                 child: _ZoomControls(
-                  onReset: _resetZoom,
-                  onZoomIn: _zoomIn,
-                  onZoomOut: _zoomOut,
-                ),
+                    onReset: _resetZoom,
+                    onZoomIn: _zoomIn,
+                    onZoomOut: _zoomOut),
               ),
+
+              // ── Tooltip ruta al hacer hover ─────────────────────────────────
+              if (_hoveredPath != null)
+                Positioned(
+                    left: 12,
+                    top: 12,
+                    child: _PathTooltip(
+                      path: _hoveredPath!,
+                      sev: state.nodeMap[_hoveredPath]?.severidad,
+                    )),
             ],
           ),
         ),
-        if (state.selectedRuta != null &&
-            _nodeAlerts.containsKey(state.selectedRuta))
-          NodeDetailPanel(alert: _nodeAlerts[state.selectedRuta]!),
+        if (state.selectedRuta != null)
+          NodeDetailPanel(
+            alert: state.nodeMap[state.selectedRuta] ??
+                AlertModel(
+                    id: -1,
+                    tipoCambio: 'CLEAN',
+                    severidad: 'BAJA',
+                    rutaArchivo: state.selectedRuta),
+          ),
       ],
     );
   }
 }
 
-// ── Banner de snapshot histórico ──────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// WIDGETS AUXILIARES
+// ─────────────────────────────────────────────────────────────────────────────
 
-class _SnapshotBanner extends StatelessWidget {
-  final VoidCallback onLive;
-  const _SnapshotBanner({required this.onLive});
+class _SeverityLegend extends StatelessWidget {
+  const _SeverityLegend();
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-      color: const Color(0xFF00D4FF).withOpacity(0.08),
-      child: Row(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+      decoration: BoxDecoration(
+        color: AppColors.surface.withOpacity(0.85),
+        border: Border.all(color: AppColors.border),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
         children: [
+          Text('Severidad',
+              style: TextStyle(
+                  color: AppColors.textSecondary,
+                  fontSize: 9,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 0.5)),
+          const SizedBox(height: 5),
+          _LegendRow(color: const Color(0xFFEF4444), label: 'ALTA'),
+          const SizedBox(height: 3),
+          _LegendRow(color: const Color(0xFFF97316), label: 'MEDIA'),
+          const SizedBox(height: 3),
+          _LegendRow(color: const Color(0xFF6B7280), label: 'BAJA'),
+        ],
+      ),
+    );
+  }
+}
+
+class _LegendRow extends StatelessWidget {
+  final Color color;
+  final String label;
+  const _LegendRow({required this.color, required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 12,
+          height: 12,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            border: Border.all(color: color, width: 2.5),
+          ),
+        ),
+        const SizedBox(width: 5),
+        Text(label,
+            style: TextStyle(
+                color: AppColors.textSecondary,
+                fontSize: 10,
+                fontWeight: FontWeight.w500)),
+      ],
+    );
+  }
+}
+
+class _SnapshotBanner extends StatelessWidget {
+  final VoidCallback onLive;
+  const _SnapshotBanner({required this.onLive});
+  @override
+  Widget build(BuildContext context) => Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+        color: const Color(0xFF00D4FF).withOpacity(0.08),
+        child: Row(children: [
           const Icon(Icons.history, size: 14, color: Color(0xFF00D4FF)),
           const SizedBox(width: 8),
-          const Text(
-            'Viendo estado histórico — el grafo muestra el pasado',
-            style: TextStyle(
-              color: Color(0xFF00D4FF),
-              fontSize: 11,
-              fontWeight: FontWeight.w500,
-            ),
-          ),
+          const Text('Viendo estado histórico — el grafo muestra el pasado',
+              style: TextStyle(
+                  color: Color(0xFF00D4FF),
+                  fontSize: 11,
+                  fontWeight: FontWeight.w500)),
           const Spacer(),
           GestureDetector(
             onTap: onLive,
@@ -273,134 +845,65 @@ class _SnapshotBanner extends StatelessWidget {
                 border:
                     Border.all(color: const Color(0xFF00D4FF).withOpacity(0.4)),
               ),
-              child: const Text(
-                'Volver a EN VIVO',
-                style: TextStyle(
-                  color: Color(0xFF00D4FF),
-                  fontSize: 10,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
+              child: const Text('Volver a EN VIVO',
+                  style: TextStyle(
+                      color: Color(0xFF00D4FF),
+                      fontSize: 10,
+                      fontWeight: FontWeight.w700)),
             ),
           ),
+        ]),
+      );
+}
+
+class _PathTooltip extends StatelessWidget {
+  final String path;
+  final String? sev;
+  const _PathTooltip({required this.path, this.sev});
+
+  @override
+  Widget build(BuildContext context) {
+    final sevColor = _severityRingColor(sev);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        border: Border.all(color: AppColors.border),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(path,
+              style: AppTextStyles.path
+                  .copyWith(color: AppColors.textPrimary, fontSize: 11)),
+          if (sev != null) ...[
+            const SizedBox(width: 8),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(
+                color: sevColor.withOpacity(0.15),
+                borderRadius: BorderRadius.circular(4),
+                border: Border.all(color: sevColor.withOpacity(0.4)),
+              ),
+              child: Text(sev!,
+                  style: TextStyle(
+                      color: sevColor,
+                      fontSize: 9,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 0.3)),
+            ),
+          ],
         ],
       ),
     );
   }
 }
 
-// ── Nodo ──────────────────────────────────────────────────────────────────────
-
-class _FimNode extends StatelessWidget {
-  final String path;
-  final AlertModel? alert;
-  final bool isSelected;
-  final bool dimmed;
-  final VoidCallback onTap;
-
-  /// Cuando no es null, sobrescribe el color del nodo con el estado histórico.
-  final String? snapshotTipo;
-
-  const _FimNode({
-    required this.path,
-    required this.alert,
-    required this.isSelected,
-    required this.onTap,
-    this.dimmed = false,
-    this.snapshotTipo,
-  });
-
-  bool get _isDir {
-    final last = path.split('/').last;
-    final ext = last.contains('.') ? last.split('.').last.toLowerCase() : '';
-    const fileExts = {
-      'txt',
-      'conf',
-      'cfg',
-      'log',
-      'json',
-      'xml',
-      'yaml',
-      'yml',
-      'sh',
-      'py',
-      'dart',
-      'java'
-    };
-    return !fileExts.contains(ext);
-  }
-
-  String get _label {
-    final name = path.split('/').last;
-    return name.isEmpty ? '/' : name;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    // snapshotTipo tiene prioridad sobre el tipo real del nodo
-    final tipo = snapshotTipo ?? alert?.tipoCambio ?? 'CLEAN';
-    final color = eventColor(tipo);
-    final size = _isDir ? 52.0 : 44.0;
-
-    return GestureDetector(
-      onTap: onTap,
-      child: Opacity(
-        opacity: dimmed ? 0.25 : 1.0,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            AnimatedContainer(
-              duration: const Duration(milliseconds: 300),
-              width: size,
-              height: size,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: color.withOpacity(isSelected ? 0.25 : 0.12),
-                border: Border.all(color: color, width: isSelected ? 2.5 : 1.5),
-                boxShadow: isSelected
-                    ? [BoxShadow(color: color.withOpacity(0.4), blurRadius: 12)]
-                    : null,
-              ),
-              child: Center(
-                child: Icon(
-                  _isDir
-                      ? Icons.folder_outlined
-                      : Icons.insert_drive_file_outlined,
-                  size: _isDir ? 22 : 18,
-                  color: color,
-                ),
-              ),
-            ),
-            const SizedBox(height: 4),
-            SizedBox(
-              width: 80,
-              child: Text(
-                _label,
-                textAlign: TextAlign.center,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontFamily: 'monospace',
-                  fontSize: 10,
-                  color: isSelected ? color : AppColors.textSecondary,
-                  fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-// ── Zoom controls ─────────────────────────────────────────────────────────────
-
 class _ZoomControls extends StatelessWidget {
   final VoidCallback onReset, onZoomIn, onZoomOut;
   const _ZoomControls(
       {required this.onReset, required this.onZoomIn, required this.onZoomOut});
-
   @override
   Widget build(BuildContext context) => Container(
         decoration: BoxDecoration(
@@ -431,8 +934,6 @@ class _ZBtn extends StatelessWidget {
             child: Icon(icon, size: 16, color: AppColors.textSecondary)),
       );
 }
-
-// ── Estados de carga ──────────────────────────────────────────────────────────
 
 class _LoadingView extends StatelessWidget {
   const _LoadingView();

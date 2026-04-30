@@ -3,10 +3,13 @@ import 'package:flutter/material.dart';
 import 'core/di/injection.dart';
 import 'core/theme/app_theme.dart';
 import 'core/router/app_router.dart';
+import 'presentation/pages/settings_page.dart'; // loadSavedBackend
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await initDependencies();
+  // Cargar host/puerto persistidos (o los valores por defecto)
+  final (host, port) = await loadSavedBackend();
+  await initDependencies(host: host, port: port);
   runApp(const FimMonitorApp());
 }
 

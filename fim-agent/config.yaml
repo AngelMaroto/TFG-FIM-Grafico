@@ -1,0 +1,22 @@
+agent:
+  hostname: "angel-server"
+  check_interval: 60  # segundos entre comprobaciones
+
+aide:
+  config_path: "/etc/aide/aide-fim.conf"
+  database_path: "/var/lib/aide/aide-fim.db"
+  database_new_path: "/var/lib/aide/aide-fim.db.new"
+
+monitor:
+  directories:
+    - /etc
+#    - /bin
+#    - /sbin
+#    - /usr/bin
+#    - /usr/sbin
+
+backend:
+  url: "http://192.168.1.128:8080"
+  api_events: "/api/events"
+  api_scans: "/api/scans"
+  timeout: 10

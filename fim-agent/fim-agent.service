@@ -1,0 +1,19 @@
+[Unit]
+Description=FIM Agent - File Integrity Monitor para Linux
+Documentation=https://github.com/AngelMaroto/TFG-FIM-Grafico
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/angel/fim-agent
+ExecStart=/usr/bin/python3 /home/angel/fim-agent/fim_agent.py check --daemon
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=fim-agent
+
+[Install]
+WantedBy=multi-user.target

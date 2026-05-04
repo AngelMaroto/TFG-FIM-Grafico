@@ -1,4 +1,6 @@
 // lib/presentation/widgets/graph/graph_filter_bar.dart
+// v2 — colores hardcodeados → context.fimColors
+//
 import 'package:flutter/material.dart';
 import '../../../core/theme/app_theme.dart';
 
@@ -41,51 +43,54 @@ class _GraphFilterBarState extends State<GraphFilterBar> {
 
   @override
   Widget build(BuildContext context) {
+    final c = context.fimColors;
+
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        border: Border(bottom: BorderSide(color: AppColors.border)),
-      ),
+      color: c.filterBarBg,
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
         children: [
-          // ── Barra de búsqueda ──────────────────────────────────────
+          // ── Barra de búsqueda ──────────────────────────────────────────
           SizedBox(
             height: 32,
             child: TextField(
               controller: _searchCtrl,
               style: AppTextStyles.path
-                  .copyWith(color: AppColors.textPrimary, fontSize: 12),
+                  .copyWith(color: c.textPrimary, fontSize: 12),
               decoration: InputDecoration(
                 hintText: 'Buscar ruta o archivo...',
-                hintStyle: AppTextStyles.bodySmall,
-                prefixIcon: const Icon(Icons.search,
-                    size: 14, color: AppColors.textDisabled),
+                hintStyle: AppTextStyles.bodySmall
+                    .copyWith(color: c.textDisabled, fontSize: 12),
+                prefixIcon: Icon(Icons.search, size: 14, color: c.textDisabled),
                 suffixIcon: _searchCtrl.text.isNotEmpty
                     ? GestureDetector(
                         onTap: () {
                           _searchCtrl.clear();
                           widget.onSearch(null);
+                          setState(() {});
                         },
-                        child: const Icon(Icons.close,
-                            size: 14, color: AppColors.textDisabled),
+                        child:
+                            Icon(Icons.close, size: 14, color: c.textDisabled),
                       )
                     : null,
                 filled: true,
-                fillColor: AppColors.surfaceVariant,
+                fillColor: c.surfaceVariant,
+                isDense: true,
                 contentPadding:
                     const EdgeInsets.symmetric(horizontal: 10, vertical: 0),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(6),
-                  borderSide: const BorderSide(color: AppColors.border),
-                ),
                 enabledBorder: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(6),
-                  borderSide: const BorderSide(color: AppColors.border),
+                  borderSide: BorderSide(color: c.border),
                 ),
                 focusedBorder: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(6),
-                  borderSide: const BorderSide(color: AppColors.primary),
+                  borderSide: BorderSide(color: c.accent, width: 1.5),
+                ),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(6),
+                  borderSide: BorderSide(color: c.border),
                 ),
               ),
               onChanged: (v) {
@@ -95,68 +100,95 @@ class _GraphFilterBarState extends State<GraphFilterBar> {
             ),
           ),
           const SizedBox(height: 8),
-          // ── Filtros tipo + severidad ───────────────────────────────
-          Row(
-            children: [
-              Text('Tipo:', style: AppTextStyles.bodySmall),
-              const SizedBox(width: 8),
-              Wrap(spacing: 6, children: [
-                _chip('Todos', null, widget.selected,
-                    onTap: () => widget.onFilter(null)),
-                _chip('NEW', 'NEW', widget.selected,
-                    color: AppColors.eventNew,
-                    onTap: () => widget.onFilter('NEW')),
-                _chip('MODIFIED', 'MODIFIED', widget.selected,
-                    color: AppColors.eventModified,
-                    onTap: () => widget.onFilter('MODIFIED')),
-                _chip('DELETED', 'DELETED', widget.selected,
-                    color: AppColors.eventDeleted,
-                    onTap: () => widget.onFilter('DELETED')),
-                _chip('PERMS', 'PERMISSIONS', widget.selected,
-                    color: AppColors.eventPerms,
-                    onTap: () => widget.onFilter('PERMISSIONS')),
-              ]),
-              const SizedBox(width: 16),
-              Text('Severidad:', style: AppTextStyles.bodySmall),
-              const SizedBox(width: 8),
-              Wrap(spacing: 6, children: [
-                _chip('Todas', null, widget.selectedSeveridad,
+          // ── Chips tipo + severidad en una sola fila scrollable ─────────
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: [
+                Text('Tipo:',
+                    style: AppTextStyles.bodySmall
+                        .copyWith(color: c.textSecondary)),
+                const SizedBox(width: 8),
+                _chip(c, 'Todos', null, widget.selected,
+                    color: c.primary, onTap: () => widget.onFilter(null)),
+                _chip(c, 'NEW', 'NEW', widget.selected,
+                    color: c.eventNew,
+                    onTap: () => widget
+                        .onFilter(widget.selected == 'NEW' ? null : 'NEW')),
+                _chip(c, 'MODIFIED', 'MODIFIED', widget.selected,
+                    color: c.eventModified,
+                    onTap: () => widget.onFilter(
+                        widget.selected == 'MODIFIED' ? null : 'MODIFIED')),
+                _chip(c, 'DELETED', 'DELETED', widget.selected,
+                    color: c.eventDeleted,
+                    onTap: () => widget.onFilter(
+                        widget.selected == 'DELETED' ? null : 'DELETED')),
+                _chip(c, 'PERMS', 'PERMISSIONS', widget.selected,
+                    color: c.eventPerms,
+                    onTap: () => widget.onFilter(
+                        widget.selected == 'PERMISSIONS'
+                            ? null
+                            : 'PERMISSIONS')),
+                const SizedBox(width: 16),
+                Text('Severidad:',
+                    style: AppTextStyles.bodySmall
+                        .copyWith(color: c.textSecondary)),
+                const SizedBox(width: 8),
+                _chip(c, 'Todas', null, widget.selectedSeveridad,
+                    color: c.primary,
                     onTap: () => widget.onSeveridadFilter(null)),
-                _chip('ALTA', 'ALTA', widget.selectedSeveridad,
-                    color: AppColors.severityHigh,
-                    onTap: () => widget.onSeveridadFilter('ALTA')),
-                _chip('MEDIA', 'MEDIA', widget.selectedSeveridad,
-                    color: AppColors.severityMedium,
-                    onTap: () => widget.onSeveridadFilter('MEDIA')),
-                _chip('BAJA', 'BAJA', widget.selectedSeveridad,
-                    color: AppColors.severityLow,
-                    onTap: () => widget.onSeveridadFilter('BAJA')),
-              ]),
-            ],
+                _chip(c, 'ALTA', 'ALTA', widget.selectedSeveridad,
+                    color: c.severityHigh,
+                    onTap: () => widget.onSeveridadFilter(
+                        widget.selectedSeveridad == 'ALTA' ? null : 'ALTA')),
+                _chip(c, 'MEDIA', 'MEDIA', widget.selectedSeveridad,
+                    color: c.severityMedium,
+                    onTap: () => widget.onSeveridadFilter(
+                        widget.selectedSeveridad == 'MEDIA' ? null : 'MEDIA')),
+                _chip(c, 'BAJA', 'BAJA', widget.selectedSeveridad,
+                    color: c.severityLow,
+                    onTap: () => widget.onSeveridadFilter(
+                        widget.selectedSeveridad == 'BAJA' ? null : 'BAJA')),
+              ],
+            ),
           ),
         ],
       ),
     );
   }
 
-  Widget _chip(String label, String? value, String? selected,
-      {Color color = AppColors.textSecondary, required VoidCallback onTap}) {
+  Widget _chip(
+    FimColors c,
+    String label,
+    String? value,
+    String? selected, {
+    required Color color,
+    required VoidCallback onTap,
+  }) {
     final active = selected == value;
-    return GestureDetector(
-      onTap: onTap,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 150),
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
-        decoration: BoxDecoration(
-          color: active ? color.withOpacity(0.15) : AppColors.surfaceVariant,
-          border: Border.all(color: active ? color : AppColors.border),
-          borderRadius: BorderRadius.circular(4),
-        ),
-        child: Text(label,
+    return Padding(
+      padding: const EdgeInsets.only(right: 6),
+      child: GestureDetector(
+        onTap: onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 150),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+          decoration: BoxDecoration(
+            color: active ? color.withOpacity(0.12) : c.surfaceVariant,
+            border: Border.all(
+              color: active ? color : c.border,
+              width: active ? 1.5 : 1.0,
+            ),
+            borderRadius: BorderRadius.circular(4),
+          ),
+          child: Text(
+            label,
             style: AppTextStyles.bodySmall.copyWith(
-              color: active ? color : AppColors.textSecondary,
-              fontWeight: active ? FontWeight.w600 : FontWeight.w400,
-            )),
+              color: active ? color : c.textSecondary,
+              fontWeight: active ? FontWeight.w700 : FontWeight.w400,
+            ),
+          ),
+        ),
       ),
     );
   }

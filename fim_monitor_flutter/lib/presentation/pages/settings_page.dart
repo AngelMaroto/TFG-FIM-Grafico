@@ -1,21 +1,6 @@
 // lib/presentation/pages/settings_page.dart
-//
-// FIXES v2.1:
-//   • _saveBackend() ya NO llama sl.reset() ni initDependencies().
-//     Esas llamadas destruían el contenedor GetIt mientras GraphBloc y
-//     TimelineBloc tenían streams activos → crash inmediato.
-//     Ahora solo guarda las prefs y notifica al usuario para que reinicie
-//     la app manualmente si quiere reconectar a un backend distinto.
-//     Para el caso habitual (mismo backend, reconectar tras caída) se llama
-//     directamente a _fetchStatus + _fetchRules sin tocar el DI.
-//
-//   • Timeout reducido a 4s en _fetchStatus y _fetchRules para que el UI
-//     no se quede bloqueado esperando cuando el backend no responde.
-//
-//   • Todos los callbacks async tienen `if (!mounted) return` después de
-//     cada await para evitar setState sobre widgets desmontados.
-//
-//   • _saveInterval también protegido con mounted guard.
+// v4 — colores hardcodeados → context.fimColors
+//      Cero referencias a AppColors en el árbol de widgets.
 //
 import 'dart:convert';
 import 'package:flutter/material.dart';
@@ -25,6 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/constants/app_constants.dart';
 import '../../core/theme/app_theme.dart';
+import '../blocs/theme/theme_bloc.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SharedPreferences keys
@@ -35,9 +21,6 @@ const _kInterval = 'scan_interval_minutes';
 const _kMinSeverity = 'min_severity';
 const _kShowOnly = 'show_only_changed';
 const _kLabels = 'show_node_labels';
-
-// FIX: timeout corto — si el backend no responde en 4s se muestra error
-// en vez de bloquear el UI indefinidamente.
 const _kHttpTimeout = Duration(seconds: 4);
 
 Future<(String, int)> loadSavedBackend() async {
@@ -49,7 +32,27 @@ Future<(String, int)> loadSavedBackend() async {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Modelo local para Config_Rules
+// GraphVisualizationPrefs — leído por FimGraphWidget
+// ─────────────────────────────────────────────────────────────────────────────
+class GraphVisualizationPrefs {
+  final bool showOnlyChanged;
+  final bool showNodeLabels;
+  const GraphVisualizationPrefs({
+    required this.showOnlyChanged,
+    required this.showNodeLabels,
+  });
+
+  static Future<GraphVisualizationPrefs> load() async {
+    final prefs = await SharedPreferences.getInstance();
+    return GraphVisualizationPrefs(
+      showOnlyChanged: prefs.getBool(_kShowOnly) ?? false,
+      showNodeLabels: prefs.getBool(_kLabels) ?? true,
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Modelo Config_Rule
 // ─────────────────────────────────────────────────────────────────────────────
 class _ConfigRule {
   final int id;
@@ -111,8 +114,7 @@ class _SettingsPageState extends State<SettingsPage> {
     final prefs = await SharedPreferences.getInstance();
     final host = prefs.getString(_kHost) ?? AppConstants.defaultBackendHost;
     final port = prefs.getInt(_kPort) ?? AppConstants.defaultBackendPort;
-
-    if (!mounted) return; // FIX: guard
+    if (!mounted) return;
     setState(() {
       _hostCtrl.text = host;
       _portCtrl.text = port.toString();
@@ -122,24 +124,22 @@ class _SettingsPageState extends State<SettingsPage> {
       _showNodeLabels = prefs.getBool(_kLabels) ?? true;
       _prefsLoaded = true;
     });
-
     _fetchStatus(host, port);
     _fetchRules(host, port);
   }
 
   Future<void> _fetchStatus(String host, int port) async {
     try {
-      final uri = Uri.parse(
-          '${AppConstants.baseUrl(host, port)}${AppConstants.statusEndpoint}');
-      // FIX: timeout corto — no bloquea si el backend no responde
-      final res = await http.get(uri).timeout(_kHttpTimeout);
-      if (!mounted) return; // FIX: guard tras await
+      final res = await http
+          .get(Uri.parse(
+              '${AppConstants.baseUrl(host, port)}${AppConstants.statusEndpoint}'))
+          .timeout(_kHttpTimeout);
+      if (!mounted) return;
       if (res.statusCode == 200) {
         setState(
             () => _statusData = jsonDecode(res.body) as Map<String, dynamic>);
       }
     } catch (_) {
-      // Backend no disponible — no hacer setState si ya está desmontado
       if (mounted) setState(() => _statusData = null);
     }
   }
@@ -151,10 +151,11 @@ class _SettingsPageState extends State<SettingsPage> {
       _rulesError = null;
     });
     try {
-      final uri = Uri.parse(
-          '${AppConstants.baseUrl(host, port)}${AppConstants.configEndpoint}');
-      final res = await http.get(uri).timeout(_kHttpTimeout);
-      if (!mounted) return; // FIX: guard tras await
+      final res = await http
+          .get(Uri.parse(
+              '${AppConstants.baseUrl(host, port)}${AppConstants.configEndpoint}'))
+          .timeout(_kHttpTimeout);
+      if (!mounted) return;
       if (res.statusCode == 200) {
         final list = jsonDecode(res.body) as List;
         setState(() {
@@ -170,12 +171,11 @@ class _SettingsPageState extends State<SettingsPage> {
         });
       }
     } catch (_) {
-      if (mounted) {
+      if (mounted)
         setState(() {
           _rulesError = 'Sin conexión con el backend';
           _rulesLoading = false;
         });
-      }
     }
   }
 
@@ -184,11 +184,12 @@ class _SettingsPageState extends State<SettingsPage> {
     final port =
         int.tryParse(_portCtrl.text.trim()) ?? AppConstants.defaultBackendPort;
     try {
-      final uri = Uri.parse(
-          '${AppConstants.baseUrl(host, port)}${AppConstants.configEndpoint}');
-      final res = await http.post(uri,
-          headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({'ruta': ruta, 'nivelSeveridad': severidad}));
+      final res = await http.post(
+        Uri.parse(
+            '${AppConstants.baseUrl(host, port)}${AppConstants.configEndpoint}'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'ruta': ruta, 'nivelSeveridad': severidad}),
+      );
       if (!mounted) return;
       if (res.statusCode == 201) {
         _fetchRules(host, port);
@@ -207,11 +208,12 @@ class _SettingsPageState extends State<SettingsPage> {
     final port =
         int.tryParse(_portCtrl.text.trim()) ?? AppConstants.defaultBackendPort;
     try {
-      final uri = Uri.parse(
-          '${AppConstants.baseUrl(host, port)}${AppConstants.configEndpoint}/$id');
-      final res = await http.put(uri,
-          headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({'nivelSeveridad': severidad}));
+      final res = await http.put(
+        Uri.parse(
+            '${AppConstants.baseUrl(host, port)}${AppConstants.configEndpoint}/$id'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'nivelSeveridad': severidad}),
+      );
       if (!mounted) return;
       if (res.statusCode == 200) _fetchRules(host, port);
     } catch (_) {}
@@ -222,28 +224,15 @@ class _SettingsPageState extends State<SettingsPage> {
     final port =
         int.tryParse(_portCtrl.text.trim()) ?? AppConstants.defaultBackendPort;
     try {
-      final uri = Uri.parse(
-          '${AppConstants.baseUrl(host, port)}${AppConstants.configEndpoint}/$id');
-      final res = await http.delete(uri).timeout(_kHttpTimeout);
+      final res = await http
+          .delete(Uri.parse(
+              '${AppConstants.baseUrl(host, port)}${AppConstants.configEndpoint}/$id'))
+          .timeout(_kHttpTimeout);
       if (!mounted) return;
       if (res.statusCode == 204) _fetchRules(host, port);
     } catch (_) {}
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // FIX PRINCIPAL: _saveBackend sin sl.reset() / initDependencies()
-  //
-  // El problema original: sl.reset() destruye el contenedor GetIt mientras
-  // GraphBloc y TimelineBloc tienen streams vivos apuntando a objetos
-  // registrados en ese contenedor (FimRepository, FimWebSocketDatasource).
-  // Al destruirlos, los streams lanzan errores en cascada que Flutter no
-  // puede manejar → "No responde".
-  //
-  // Solución: guardar las prefs y reconectar SOLO haciendo ping al nuevo
-  // backend. Los BLoCs seguirán usando la URL anterior hasta que el usuario
-  // reinicie la app, momento en que se leen las prefs guardadas y se
-  // inicializa todo con la nueva URL.
-  // ─────────────────────────────────────────────────────────────────────────
   Future<void> _saveBackend() async {
     final host = _hostCtrl.text.trim();
     final port = int.tryParse(_portCtrl.text.trim());
@@ -257,31 +246,22 @@ class _SettingsPageState extends State<SettingsPage> {
     }
 
     setState(() => _saving = true);
-
-    // 1. Guardar en SharedPreferences
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_kHost, host);
     await prefs.setInt(_kPort, port);
-
-    if (!mounted) return; // FIX: guard tras await
+    if (!mounted) return;
     setState(() => _saving = false);
 
-    // 2. Verificar conectividad con el nuevo host (sin tocar DI)
     _snack('Guardado: $host:$port — verificando conexión…');
     await _fetchStatus(host, port);
     if (!mounted) return;
 
     if (_statusData != null) {
-      // Backend responde: refrescar datos
       _fetchRules(host, port);
       _snack(
           '✓ Conectado a $host:$port — reinicia la app para aplicar en el grafo');
     } else {
-      // Backend no responde: avisar sin crashear
-      _snack(
-        'Guardado. Backend no responde en $host:$port — comprueba que está levantado.',
-        error: true,
-      );
+      _snack('Guardado. Backend no responde en $host:$port', error: true);
     }
   }
 
@@ -299,14 +279,15 @@ class _SettingsPageState extends State<SettingsPage> {
     final port =
         int.tryParse(_portCtrl.text.trim()) ?? AppConstants.defaultBackendPort;
     try {
-      final uri =
-          Uri.parse('${AppConstants.baseUrl(host, port)}/api/agent/check');
-      final res = await http.post(uri).timeout(_kHttpTimeout);
-      if (!mounted) return; // FIX: guard
+      final res = await http
+          .post(
+              Uri.parse('${AppConstants.baseUrl(host, port)}/api/agent/check'))
+          .timeout(_kHttpTimeout);
+      if (!mounted) return;
       if (res.statusCode == 200) {
         _snack('Check solicitado. El agente lo ejecutará en breve.');
         Future.delayed(const Duration(seconds: 3), () {
-          if (mounted) _fetchStatus(host, port); // FIX: guard en delayed
+          if (mounted) _fetchStatus(host, port);
         });
       } else {
         _snack('Error ${res.statusCode} al solicitar check', error: true);
@@ -318,52 +299,49 @@ class _SettingsPageState extends State<SettingsPage> {
     }
   }
 
-  void _snack(String msg, {bool error = false}) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Text(msg,
-          style: AppTextStyles.bodySmall.copyWith(
-              color: error ? AppColors.eventDeleted : AppColors.onPrimary)),
-      backgroundColor: error ? AppColors.surfaceVariant : AppColors.primary,
-      behavior: SnackBarBehavior.floating,
-    ));
-  }
-
   Future<void> _saveInterval(int minutes) async {
     if (!mounted) return;
     setState(() => _scanInterval = minutes);
     _savePref(_kInterval, minutes);
-
     final prefs = await SharedPreferences.getInstance();
     final host = prefs.getString(_kHost) ?? AppConstants.defaultBackendHost;
     final port = prefs.getInt(_kPort) ?? AppConstants.defaultBackendPort;
-
-    if (!mounted) return; // FIX: guard tras await
+    if (!mounted) return;
     try {
-      final uri = Uri.parse(
-          '${AppConstants.baseUrl(host, port)}/api/config/system/scan_interval');
       final res = await http
           .put(
-            uri,
+            Uri.parse(
+                '${AppConstants.baseUrl(host, port)}/api/config/system/scan_interval'),
             headers: {'Content-Type': 'application/json'},
             body: jsonEncode({
               'value': (minutes * 60).toString(),
-              'descripcion': 'Intervalo de escaneo en segundos',
+              'descripcion': 'Intervalo de escaneo en segundos'
             }),
           )
           .timeout(_kHttpTimeout);
-      if (!mounted) return; // FIX: guard
+      if (!mounted) return;
       if (res.statusCode == 200) {
         _snack('Intervalo actualizado a $minutes min en el agente.');
       } else {
         _snack('Error al guardar intervalo en backend', error: true);
       }
     } catch (_) {
-      if (mounted) {
+      if (mounted)
         _snack('Sin conexión — intervalo guardado solo localmente',
             error: true);
-      }
     }
+  }
+
+  void _snack(String msg, {bool error = false}) {
+    if (!mounted) return;
+    final c = context.fimColors;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(msg,
+          style: AppTextStyles.bodySmall
+              .copyWith(color: error ? c.eventDeleted : c.onPrimary)),
+      backgroundColor: error ? c.surfaceVariant : c.primary,
+      behavior: SnackBarBehavior.floating,
+    ));
   }
 
   // ── Build ──────────────────────────────────────────────────────────────────
@@ -371,9 +349,9 @@ class _SettingsPageState extends State<SettingsPage> {
   @override
   Widget build(BuildContext context) {
     if (!_prefsLoaded) {
-      return const Scaffold(
-        body:
-            Center(child: CircularProgressIndicator(color: AppColors.primary)),
+      return Scaffold(
+        body: Center(
+            child: CircularProgressIndicator(color: context.fimColors.primary)),
       );
     }
     return Scaffold(
@@ -391,6 +369,8 @@ class _SettingsPageState extends State<SettingsPage> {
           const SizedBox(height: 12),
           _buildSeveritySection(),
           const SizedBox(height: 12),
+          _buildAppearanceSection(),
+          const SizedBox(height: 12),
           _buildVisualizationSection(),
           const SizedBox(height: 12),
           _buildAboutSection(),
@@ -403,69 +383,61 @@ class _SettingsPageState extends State<SettingsPage> {
   // ── Estado del sistema ─────────────────────────────────────────────────────
 
   Widget _buildStatusSection() {
+    final c = context.fimColors;
     return _Card(
       title: 'Estado del sistema',
-      action: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          _checkLoading
-              ? const SizedBox(
-                  width: 16,
-                  height: 16,
-                  child: CircularProgressIndicator(
-                      strokeWidth: 2, color: AppColors.primary))
-              : IconButton(
-                  icon: const Icon(Icons.play_circle_outline,
-                      size: 18, color: AppColors.primary),
-                  tooltip: 'Ejecutar check ahora',
-                  onPressed: _requestCheck,
-                ),
-          IconButton(
-            icon: const Icon(Icons.refresh,
-                size: 16, color: AppColors.textSecondary),
-            tooltip: 'Actualizar estado',
-            onPressed: () {
-              final host = _hostCtrl.text.trim();
-              final port = int.tryParse(_portCtrl.text.trim()) ?? 8080;
-              _fetchStatus(host, port);
-              _fetchRules(host, port);
-            },
-          ),
-        ],
-      ),
+      action: Row(mainAxisSize: MainAxisSize.min, children: [
+        _checkLoading
+            ? SizedBox(
+                width: 16,
+                height: 16,
+                child:
+                    CircularProgressIndicator(strokeWidth: 2, color: c.primary))
+            : IconButton(
+                icon:
+                    Icon(Icons.play_circle_outline, size: 18, color: c.primary),
+                tooltip: 'Ejecutar check ahora',
+                onPressed: _requestCheck,
+              ),
+        IconButton(
+          icon: Icon(Icons.refresh, size: 16, color: c.textSecondary),
+          tooltip: 'Actualizar estado',
+          onPressed: () {
+            final host = _hostCtrl.text.trim();
+            final port = int.tryParse(_portCtrl.text.trim()) ?? 8080;
+            _fetchStatus(host, port);
+            _fetchRules(host, port);
+          },
+        ),
+      ]),
       child: Column(children: [
         _StatusRow(
           label: _statusData != null
               ? 'Backend REST: Conectado'
               : 'Backend REST: Sin conexión',
-          color: _statusData != null
-              ? AppColors.eventClean
-              : AppColors.eventDeleted,
+          color: _statusData != null ? c.eventClean : c.eventDeleted,
         ),
-        const Divider(height: 1, color: AppColors.border),
+        Divider(height: 1, color: c.border),
         _StatusRow(
           label: _statusData != null
               ? 'WebSocket: Disponible'
               : 'WebSocket: Error (ver logs)',
-          color: _statusData != null
-              ? AppColors.eventClean
-              : AppColors.eventDeleted,
+          color: _statusData != null ? c.eventClean : c.eventDeleted,
         ),
         if (_statusData != null) ...[
-          const Divider(height: 1, color: AppColors.border),
+          Divider(height: 1, color: c.border),
           _InfoRow(
               label: 'Servidor',
               value: _statusData!['hostname']?.toString() ?? '—'),
-          const Divider(height: 1, color: AppColors.border),
+          Divider(height: 1, color: c.border),
           _InfoRow(
               label: 'Último escaneo',
               value: _formatTs(_statusData!['ultimoScan']?.toString())),
-          const Divider(height: 1, color: AppColors.border),
+          Divider(height: 1, color: c.border),
           _InfoRow(
-            label: 'Escaneos / Eventos',
-            value:
-                '${_statusData!['scans'] ?? 0} / ${_statusData!['events'] ?? 0}',
-          ),
+              label: 'Escaneos / Eventos',
+              value:
+                  '${_statusData!['scans'] ?? 0} / ${_statusData!['events'] ?? 0}'),
         ],
       ]),
     );
@@ -474,6 +446,7 @@ class _SettingsPageState extends State<SettingsPage> {
   // ── Conexión al backend ────────────────────────────────────────────────────
 
   Widget _buildBackendSection() {
+    final c = context.fimColors;
     return _Card(
       title: 'Conexión al backend',
       child: Padding(
@@ -481,65 +454,41 @@ class _SettingsPageState extends State<SettingsPage> {
         child: Column(children: [
           Row(children: [
             Expanded(
-              flex: 5,
-              child: _Field(
-                  label: 'Host / IP', ctrl: _hostCtrl, hint: '192.168.1.100'),
-            ),
+                flex: 5,
+                child: _Field(
+                    label: 'Host / IP',
+                    ctrl: _hostCtrl,
+                    hint: '192.168.1.100')),
             const SizedBox(width: 8),
             Expanded(
-              flex: 2,
-              child: _Field(
-                  label: 'Puerto',
-                  ctrl: _portCtrl,
-                  hint: '8080',
-                  keyboard: TextInputType.number),
-            ),
+                flex: 2,
+                child: _Field(
+                    label: 'Puerto',
+                    ctrl: _portCtrl,
+                    hint: '8080',
+                    keyboard: TextInputType.number)),
           ]),
-          const SizedBox(height: 8),
-          // Nota informativa sobre el reinicio
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-            decoration: BoxDecoration(
-              color: AppColors.primary.withOpacity(0.07),
-              borderRadius: BorderRadius.circular(6),
-              border: Border.all(color: AppColors.primary.withOpacity(0.2)),
-            ),
-            child: Row(
-              children: [
-                Icon(Icons.info_outline,
-                    size: 13, color: AppColors.primary.withOpacity(0.7)),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: Text(
-                    'Tras cambiar la URL, reinicia la app para que el grafo use el nuevo backend.',
-                    style: AppTextStyles.bodySmall
-                        .copyWith(color: AppColors.textSecondary, fontSize: 10),
-                  ),
-                ),
-              ],
-            ),
-          ),
           const SizedBox(height: 10),
           SizedBox(
             width: double.infinity,
             child: ElevatedButton(
               style: ElevatedButton.styleFrom(
-                backgroundColor: AppColors.primary,
-                foregroundColor: AppColors.onPrimary,
+                backgroundColor: c.primary,
+                foregroundColor: c.onPrimary,
                 padding: const EdgeInsets.symmetric(vertical: 12),
                 shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(6)),
               ),
               onPressed: _saving ? null : _saveBackend,
               child: _saving
-                  ? const SizedBox(
+                  ? SizedBox(
                       width: 16,
                       height: 16,
                       child: CircularProgressIndicator(
-                          strokeWidth: 2, color: AppColors.onPrimary))
+                          strokeWidth: 2, color: c.onPrimary))
                   : Text('Guardar y reconectar',
                       style: AppTextStyles.titleMedium
-                          .copyWith(color: AppColors.onPrimary)),
+                          .copyWith(color: c.onPrimary)),
             ),
           ),
         ]),
@@ -550,35 +499,34 @@ class _SettingsPageState extends State<SettingsPage> {
   // ── Directorios monitorizados ──────────────────────────────────────────────
 
   Widget _buildRulesSection() {
+    final c = context.fimColors;
     return _Card(
       title: 'Directorios monitorizados',
       action: IconButton(
-        icon: const Icon(Icons.add, size: 16, color: AppColors.primary),
+        icon: Icon(Icons.add, size: 16, color: c.primary),
         onPressed: () => _showAddDialog(),
       ),
       child: _rulesLoading
-          ? const Padding(
-              padding: EdgeInsets.all(16),
+          ? Padding(
+              padding: const EdgeInsets.all(16),
               child: Center(
                   child: CircularProgressIndicator(
-                      strokeWidth: 2, color: AppColors.primary)))
+                      strokeWidth: 2, color: c.primary)))
           : _rulesError != null
               ? Padding(
                   padding: const EdgeInsets.all(12),
                   child: Text(_rulesError!,
                       style: AppTextStyles.bodySmall
-                          .copyWith(color: AppColors.eventDeleted)))
+                          .copyWith(color: c.eventDeleted)))
               : _rules.isEmpty
                   ? Padding(
                       padding: const EdgeInsets.all(16),
                       child: Center(
-                        child: Text(
-                          'Sin reglas. Pulsa + para añadir un directorio.',
-                          style: AppTextStyles.bodySmall,
-                          textAlign: TextAlign.center,
-                        ),
-                      ),
-                    )
+                          child: Text(
+                              'Sin reglas. Pulsa + para añadir un directorio.',
+                              style: AppTextStyles.bodySmall
+                                  .copyWith(color: c.textSecondary),
+                              textAlign: TextAlign.center)))
                   : Column(
                       children: _rules
                           .map((r) => _RuleTile(
@@ -586,46 +534,40 @@ class _SettingsPageState extends State<SettingsPage> {
                                 onDelete: () => _confirmDelete(r),
                                 onChangeSev: (sev) => _updateRule(r.id, sev),
                               ))
-                          .toList(),
-                    ),
+                          .toList()),
     );
   }
 
   // ── Intervalo de escaneo ───────────────────────────────────────────────────
 
   Widget _buildIntervalSection() {
+    final c = context.fimColors;
     const options = [1, 5, 15, 30, 60];
     return _Card(
       title: 'Intervalo de escaneo',
       child: Padding(
         padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Wrap(
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Wrap(
               spacing: 8,
               children: options.map((m) {
                 final sel = _scanInterval == m;
                 return ChoiceChip(
                   label: Text(m == 60 ? '1 h' : '$m min'),
                   selected: sel,
-                  selectedColor: AppColors.primary.withOpacity(0.15),
-                  labelStyle: AppTextStyles.bodySmall.copyWith(
-                      color: sel ? AppColors.primary : AppColors.textSecondary),
-                  side: BorderSide(
-                      color: sel ? AppColors.primary : AppColors.border),
+                  selectedColor: c.primary.withOpacity(0.12),
+                  labelStyle: AppTextStyles.bodySmall
+                      .copyWith(color: sel ? c.primary : c.textSecondary),
+                  side: BorderSide(color: sel ? c.primary : c.border),
                   onSelected: (_) => _saveInterval(m),
                 );
-              }).toList(),
-            ),
-            const SizedBox(height: 6),
-            Text(
+              }).toList()),
+          const SizedBox(height: 6),
+          Text(
               'El agente comprobará cambios cada $_scanInterval '
               '${_scanInterval == 60 ? 'hora' : 'minutos'}.',
-              style: AppTextStyles.bodySmall,
-            ),
-          ],
-        ),
+              style: AppTextStyles.bodySmall.copyWith(color: c.textSecondary)),
+        ]),
       ),
     );
   }
@@ -633,40 +575,65 @@ class _SettingsPageState extends State<SettingsPage> {
   // ── Severidad mínima ───────────────────────────────────────────────────────
 
   Widget _buildSeveritySection() {
+    final c = context.fimColors;
     const opts = ['ALTA', 'MEDIA', 'BAJA'];
     return _Card(
       title: 'Severidad mínima visible',
       child: Padding(
         padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Wrap(
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Wrap(
               spacing: 8,
               children: opts.map((s) {
                 final sel = _minSeverity == s;
-                final c = severityColor(s);
+                final col = severityColorFrom(s, c);
                 return ChoiceChip(
                   label: Text(s),
                   selected: sel,
-                  selectedColor: c.withOpacity(0.15),
+                  selectedColor: col.withOpacity(0.12),
                   labelStyle: AppTextStyles.bodySmall
-                      .copyWith(color: sel ? c : AppColors.textSecondary),
-                  side: BorderSide(color: sel ? c : AppColors.border),
+                      .copyWith(color: sel ? col : c.textSecondary),
+                  side: BorderSide(color: sel ? col : c.border),
                   onSelected: (_) {
                     setState(() => _minSeverity = s);
                     _savePref(_kMinSeverity, s);
                   },
                 );
-              }).toList(),
-            ),
-            const SizedBox(height: 6),
-            Text(
+              }).toList()),
+          const SizedBox(height: 6),
+          Text(
               'Solo se mostrarán alertas de severidad $_minSeverity o superior.',
-              style: AppTextStyles.bodySmall,
+              style: AppTextStyles.bodySmall.copyWith(color: c.textSecondary)),
+        ]),
+      ),
+    );
+  }
+
+  // ── Apariencia ─────────────────────────────────────────────────────────────
+
+  Widget _buildAppearanceSection() {
+    final c = context.fimColors;
+    return _Card(
+      title: 'Apariencia',
+      child: BlocBuilder<ThemeBloc, ThemeState>(
+        builder: (context, themeState) => Column(children: [
+          _ToggleRow(
+            label: 'Tema oscuro',
+            subtitle: themeState.isDark
+                ? 'Interfaz oscura (estilo terminal)'
+                : 'Interfaz clara (slate azulado)',
+            value: themeState.isDark,
+            leading: Icon(
+              themeState.isDark
+                  ? Icons.dark_mode_outlined
+                  : Icons.light_mode_outlined,
+              size: 16,
+              color: themeState.isDark ? c.primary : c.accent,
             ),
-          ],
-        ),
+            onChanged: (_) =>
+                context.read<ThemeBloc>().add(const ThemeToggled()),
+          ),
+        ]),
       ),
     );
   }
@@ -674,6 +641,7 @@ class _SettingsPageState extends State<SettingsPage> {
   // ── Visualización ──────────────────────────────────────────────────────────
 
   Widget _buildVisualizationSection() {
+    final c = context.fimColors;
     return _Card(
       title: 'Opciones de visualización',
       child: Column(children: [
@@ -686,7 +654,7 @@ class _SettingsPageState extends State<SettingsPage> {
             _savePref(_kShowOnly, v);
           },
         ),
-        const Divider(height: 1, color: AppColors.border),
+        Divider(height: 1, color: c.border),
         _ToggleRow(
           label: 'Etiquetas en el grafo',
           subtitle: 'Muestra el nombre del archivo sobre cada nodo',
@@ -703,15 +671,16 @@ class _SettingsPageState extends State<SettingsPage> {
   // ── Acerca de ──────────────────────────────────────────────────────────────
 
   Widget _buildAboutSection() {
+    final c = context.fimColors;
     return _Card(
       title: 'Acerca de',
       child: Column(children: [
         _InfoRow(label: 'Versión', value: '1.0.0-beta'),
-        const Divider(height: 1, color: AppColors.border),
+        Divider(height: 1, color: c.border),
         _InfoRow(label: 'Autor', value: 'Ángel Maroto García'),
-        const Divider(height: 1, color: AppColors.border),
+        Divider(height: 1, color: c.border),
         _InfoRow(label: 'Proyecto', value: 'TFG DAM · IFC02S · 2025-2026'),
-        const Divider(height: 1, color: AppColors.border),
+        Divider(height: 1, color: c.border),
         _InfoRow(
             label: 'Stack',
             value: 'Flutter · Spring Boot · SQLite · AIDE',
@@ -723,6 +692,7 @@ class _SettingsPageState extends State<SettingsPage> {
   // ── Diálogos ───────────────────────────────────────────────────────────────
 
   void _showAddDialog() {
+    final c = context.fimColors;
     final ctrl = TextEditingController();
     String sev = 'MEDIA';
 
@@ -730,63 +700,68 @@ class _SettingsPageState extends State<SettingsPage> {
       context: context,
       builder: (_) => StatefulBuilder(
         builder: (ctx, setSt) => AlertDialog(
-          backgroundColor: AppColors.surface,
-          title: Text('Añadir directorio', style: AppTextStyles.titleMedium),
+          backgroundColor: c.surface,
+          shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(10),
+              side: BorderSide(color: c.border)),
+          title: Text('Añadir directorio',
+              style: AppTextStyles.titleMedium.copyWith(color: c.textPrimary)),
           content: Column(mainAxisSize: MainAxisSize.min, children: [
             TextField(
               controller: ctrl,
               autofocus: true,
-              style: AppTextStyles.path.copyWith(color: AppColors.textPrimary),
+              style: AppTextStyles.path.copyWith(color: c.textPrimary),
               decoration: InputDecoration(
                 labelText: 'Ruta del directorio',
-                labelStyle: AppTextStyles.bodySmall,
+                labelStyle:
+                    AppTextStyles.bodySmall.copyWith(color: c.textSecondary),
                 hintText: '/etc/ssh',
-                hintStyle: AppTextStyles.bodySmall,
+                hintStyle:
+                    AppTextStyles.bodySmall.copyWith(color: c.textDisabled),
                 filled: true,
-                fillColor: AppColors.surfaceVariant,
-                prefixIcon: const Icon(Icons.folder_outlined,
-                    size: 16, color: AppColors.textSecondary),
-                border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(6),
-                    borderSide: const BorderSide(color: AppColors.border)),
+                fillColor: c.surfaceVariant,
+                prefixIcon: Icon(Icons.folder_outlined,
+                    size: 16, color: c.textSecondary),
                 enabledBorder: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(6),
-                    borderSide: const BorderSide(color: AppColors.border)),
+                    borderSide: BorderSide(color: c.border)),
+                focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(6),
+                    borderSide: BorderSide(color: c.accent, width: 1.5)),
               ),
             ),
             const SizedBox(height: 16),
             Align(
-              alignment: Alignment.centerLeft,
-              child: Text('Severidad', style: AppTextStyles.bodySmall),
-            ),
+                alignment: Alignment.centerLeft,
+                child: Text('Severidad',
+                    style: AppTextStyles.bodySmall
+                        .copyWith(color: c.textSecondary))),
             const SizedBox(height: 8),
             Wrap(
-              spacing: 8,
-              children: ['ALTA', 'MEDIA', 'BAJA'].map((s) {
-                final c = severityColor(s);
-                return ChoiceChip(
-                  label: Text(s),
-                  selected: sev == s,
-                  selectedColor: c.withOpacity(0.15),
-                  labelStyle: AppTextStyles.bodySmall
-                      .copyWith(color: sev == s ? c : AppColors.textSecondary),
-                  side: BorderSide(color: sev == s ? c : AppColors.border),
-                  onSelected: (_) => setSt(() => sev = s),
-                );
-              }).toList(),
-            ),
+                spacing: 8,
+                children: ['ALTA', 'MEDIA', 'BAJA'].map((s) {
+                  final col = severityColorFrom(s, c);
+                  return ChoiceChip(
+                    label: Text(s),
+                    selected: sev == s,
+                    selectedColor: col.withOpacity(0.12),
+                    labelStyle: AppTextStyles.bodySmall
+                        .copyWith(color: sev == s ? col : c.textSecondary),
+                    side: BorderSide(color: sev == s ? col : c.border),
+                    onSelected: (_) => setSt(() => sev = s),
+                  );
+                }).toList()),
           ]),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(ctx),
               child: Text('Cancelar',
-                  style: AppTextStyles.bodySmall
-                      .copyWith(color: AppColors.textSecondary)),
+                  style:
+                      AppTextStyles.bodySmall.copyWith(color: c.textSecondary)),
             ),
             ElevatedButton(
               style: ElevatedButton.styleFrom(
-                  backgroundColor: AppColors.primary,
-                  foregroundColor: AppColors.onPrimary),
+                  backgroundColor: c.primary, foregroundColor: c.onPrimary),
               onPressed: () {
                 final ruta = ctrl.text.trim();
                 if (ruta.isEmpty) return;
@@ -794,8 +769,7 @@ class _SettingsPageState extends State<SettingsPage> {
                 _addRule(ruta, sev);
               },
               child: Text('Añadir',
-                  style: AppTextStyles.bodySmall
-                      .copyWith(color: AppColors.onPrimary)),
+                  style: AppTextStyles.bodySmall.copyWith(color: c.onPrimary)),
             ),
           ],
         ),
@@ -804,48 +778,46 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   void _confirmDelete(_ConfigRule rule) {
+    final c = context.fimColors;
     showDialog<void>(
       context: context,
       builder: (_) => AlertDialog(
-        backgroundColor: AppColors.surface,
-        title: Text('Eliminar regla', style: AppTextStyles.titleMedium),
+        backgroundColor: c.surface,
+        shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(10),
+            side: BorderSide(color: c.border)),
+        title: Text('Eliminar regla',
+            style: AppTextStyles.titleMedium.copyWith(color: c.textPrimary)),
         content: Text('¿Eliminar la regla para "${rule.ruta}"?',
-            style: AppTextStyles.bodySmall),
+            style: AppTextStyles.bodySmall.copyWith(color: c.textSecondary)),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
             child: Text('Cancelar',
-                style: AppTextStyles.bodySmall
-                    .copyWith(color: AppColors.textSecondary)),
+                style:
+                    AppTextStyles.bodySmall.copyWith(color: c.textSecondary)),
           ),
           ElevatedButton(
             style: ElevatedButton.styleFrom(
-                backgroundColor: AppColors.eventDeleted,
-                foregroundColor: AppColors.onPrimary),
+                backgroundColor: c.eventDeleted, foregroundColor: c.onPrimary),
             onPressed: () {
               Navigator.pop(context);
               _deleteRule(rule.id);
             },
             child: Text('Eliminar',
-                style: AppTextStyles.bodySmall
-                    .copyWith(color: AppColors.onPrimary)),
+                style: AppTextStyles.bodySmall.copyWith(color: c.onPrimary)),
           ),
         ],
       ),
     );
   }
 
-  // ── Helpers ────────────────────────────────────────────────────────────────
-
   String _formatTs(String? ts) {
     if (ts == null || ts == 'Sin escaneos') return 'Sin escaneos';
     try {
       final dt = DateTime.parse(ts);
-      return '${dt.day.toString().padLeft(2, '0')}/'
-          '${dt.month.toString().padLeft(2, '0')}/'
-          '${dt.year}  '
-          '${dt.hour.toString().padLeft(2, '0')}:'
-          '${dt.minute.toString().padLeft(2, '0')}';
+      return '${dt.day.toString().padLeft(2, '0')}/${dt.month.toString().padLeft(2, '0')}/${dt.year}'
+          '  ${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
     } catch (_) {
       return ts;
     }
@@ -853,7 +825,7 @@ class _SettingsPageState extends State<SettingsPage> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Widgets auxiliares — sin cambios
+// Widgets auxiliares — todos usan context.fimColors
 // ─────────────────────────────────────────────────────────────────────────────
 
 class _Card extends StatelessWidget {
@@ -864,10 +836,11 @@ class _Card extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final c = context.fimColors;
     return Container(
       decoration: BoxDecoration(
-        color: AppColors.surface,
-        border: Border.all(color: AppColors.border),
+        color: c.surface,
+        border: Border.all(color: c.border),
         borderRadius: BorderRadius.circular(8),
       ),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -875,14 +848,13 @@ class _Card extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
           child: Row(children: [
             Expanded(
-              child: Text(title,
-                  style: AppTextStyles.titleMedium
-                      .copyWith(color: AppColors.primary)),
-            ),
+                child: Text(title,
+                    style:
+                        AppTextStyles.titleMedium.copyWith(color: c.primary))),
             if (action != null) action!,
           ]),
         ),
-        const Divider(height: 1, color: AppColors.border),
+        Divider(height: 1, color: c.border),
         child,
       ]),
     );
@@ -895,109 +867,119 @@ class _StatusRow extends StatelessWidget {
   const _StatusRow({required this.label, required this.color});
 
   @override
-  Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-        child: Row(children: [
-          Container(
+  Widget build(BuildContext context) {
+    final c = context.fimColors;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      child: Row(children: [
+        Container(
             width: 8,
             height: 8,
-            decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-          ),
-          const SizedBox(width: 8),
-          Text(label,
-              style: AppTextStyles.bodySmall
-                  .copyWith(color: AppColors.textPrimary)),
-        ]),
-      );
+            decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
+        const SizedBox(width: 8),
+        Text(label,
+            style: AppTextStyles.bodySmall.copyWith(color: c.textPrimary)),
+      ]),
+    );
+  }
 }
 
 class _InfoRow extends StatelessWidget {
-  final String label;
-  final String value;
+  final String label, value;
   final bool mono;
   const _InfoRow({required this.label, required this.value, this.mono = false});
 
   @override
-  Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-        child: Row(children: [
-          Expanded(child: Text(label, style: AppTextStyles.bodySmall)),
-          Text(value,
-              style: mono
-                  ? AppTextStyles.path
-                  : AppTextStyles.bodySmall
-                      .copyWith(color: AppColors.textPrimary)),
-        ]),
-      );
+  Widget build(BuildContext context) {
+    final c = context.fimColors;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      child: Row(children: [
+        Expanded(
+            child: Text(label,
+                style:
+                    AppTextStyles.bodySmall.copyWith(color: c.textSecondary))),
+        Text(value,
+            style: mono
+                ? AppTextStyles.path.copyWith(color: c.textPrimary)
+                : AppTextStyles.bodySmall.copyWith(color: c.textPrimary)),
+      ]),
+    );
+  }
 }
 
 class _ToggleRow extends StatelessWidget {
-  final String label;
-  final String subtitle;
+  final String label, subtitle;
   final bool value;
   final ValueChanged<bool> onChanged;
-  const _ToggleRow(
-      {required this.label,
-      required this.subtitle,
-      required this.value,
-      required this.onChanged});
+  final Widget? leading;
+  const _ToggleRow({
+    required this.label,
+    required this.subtitle,
+    required this.value,
+    required this.onChanged,
+    this.leading,
+  });
 
   @override
-  Widget build(BuildContext context) => SwitchListTile(
-        title: Text(label,
-            style:
-                AppTextStyles.bodySmall.copyWith(color: AppColors.textPrimary)),
-        subtitle: Text(subtitle, style: AppTextStyles.bodySmall),
-        value: value,
-        activeColor: AppColors.primary,
-        onChanged: onChanged,
-      );
+  Widget build(BuildContext context) {
+    final c = context.fimColors;
+    return SwitchListTile(
+      secondary: leading,
+      title: Text(label,
+          style: AppTextStyles.bodySmall.copyWith(color: c.textPrimary)),
+      subtitle: Text(subtitle,
+          style: AppTextStyles.bodySmall.copyWith(color: c.textSecondary)),
+      value: value,
+      activeColor: c.primary,
+      onChanged: onChanged,
+    );
+  }
 }
 
 class _Field extends StatelessWidget {
-  final String label;
+  final String label, hint;
   final TextEditingController ctrl;
-  final String hint;
   final TextInputType keyboard;
-  const _Field(
-      {required this.label,
-      required this.ctrl,
-      required this.hint,
-      this.keyboard = TextInputType.text});
+  const _Field({
+    required this.label,
+    required this.ctrl,
+    required this.hint,
+    this.keyboard = TextInputType.text,
+  });
 
   @override
-  Widget build(BuildContext context) => Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(label,
-              style: AppTextStyles.bodySmall
-                  .copyWith(color: AppColors.textSecondary)),
-          const SizedBox(height: 4),
-          TextField(
-            controller: ctrl,
-            keyboardType: keyboard,
-            style: AppTextStyles.path.copyWith(color: AppColors.textPrimary),
-            decoration: InputDecoration(
-              hintText: hint,
-              hintStyle: AppTextStyles.bodySmall,
-              filled: true,
-              fillColor: AppColors.surfaceVariant,
-              isDense: true,
-              contentPadding:
-                  const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-              border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(6),
-                  borderSide: const BorderSide(color: AppColors.border)),
-              enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(6),
-                  borderSide: const BorderSide(color: AppColors.border)),
-              focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(6),
-                  borderSide: const BorderSide(color: AppColors.primary)),
-            ),
-          ),
-        ],
-      );
+  Widget build(BuildContext context) {
+    final c = context.fimColors;
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Text(label,
+          style: AppTextStyles.bodySmall.copyWith(color: c.textSecondary)),
+      const SizedBox(height: 4),
+      TextField(
+        controller: ctrl,
+        keyboardType: keyboard,
+        style: AppTextStyles.path.copyWith(color: c.textPrimary),
+        decoration: InputDecoration(
+          hintText: hint,
+          hintStyle: AppTextStyles.bodySmall.copyWith(color: c.textDisabled),
+          filled: true,
+          fillColor: c.surfaceVariant,
+          isDense: true,
+          contentPadding:
+              const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(6),
+              borderSide: BorderSide(color: c.border)),
+          focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(6),
+              borderSide: BorderSide(color: c.accent, width: 1.5)),
+          border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(6),
+              borderSide: BorderSide(color: c.border)),
+        ),
+      ),
+    ]);
+  }
 }
 
 class _RuleTile extends StatelessWidget {
@@ -1008,57 +990,52 @@ class _RuleTile extends StatelessWidget {
       {required this.rule, required this.onDelete, required this.onChangeSev});
 
   @override
-  Widget build(BuildContext context) => Column(children: [
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          child: Row(children: [
-            const Icon(Icons.folder_outlined,
-                size: 14, color: AppColors.textSecondary),
-            const SizedBox(width: 8),
-            Expanded(
+  Widget build(BuildContext context) {
+    final c = context.fimColors;
+    final sevColor = severityColorFrom(rule.nivelSeveridad, c);
+    return Column(children: [
+      Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        child: Row(children: [
+          Icon(Icons.folder_outlined, size: 14, color: c.textSecondary),
+          const SizedBox(width: 8),
+          Expanded(
               child: Text(rule.ruta,
-                  style: AppTextStyles.path
-                      .copyWith(color: AppColors.textPrimary)),
-            ),
-            PopupMenuButton<String>(
-              initialValue: rule.nivelSeveridad,
-              color: AppColors.surfaceVariant,
-              onSelected: onChangeSev,
-              itemBuilder: (_) => ['ALTA', 'MEDIA', 'BAJA']
-                  .map((s) => PopupMenuItem(
-                        value: s,
-                        child: Text(s,
-                            style: AppTextStyles.bodySmall
-                                .copyWith(color: severityColor(s))),
-                      ))
-                  .toList(),
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                decoration: BoxDecoration(
-                  border: Border.all(
-                      color:
-                          severityColor(rule.nivelSeveridad).withOpacity(0.5)),
-                  borderRadius: BorderRadius.circular(4),
-                  color: severityColor(rule.nivelSeveridad).withOpacity(0.1),
-                ),
-                child: Text(
-                  rule.nivelSeveridad,
-                  style: AppTextStyles.bodySmall.copyWith(
-                      color: severityColor(rule.nivelSeveridad),
-                      fontWeight: FontWeight.w600),
-                ),
+                  style: AppTextStyles.path.copyWith(color: c.textPrimary))),
+          PopupMenuButton<String>(
+            initialValue: rule.nivelSeveridad,
+            color: c.surfaceVariant,
+            onSelected: onChangeSev,
+            itemBuilder: (_) => ['ALTA', 'MEDIA', 'BAJA'].map((s) {
+              final sc = severityColorFrom(s, c);
+              return PopupMenuItem(
+                value: s,
+                child:
+                    Text(s, style: AppTextStyles.bodySmall.copyWith(color: sc)),
+              );
+            }).toList(),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              decoration: BoxDecoration(
+                border: Border.all(color: sevColor.withOpacity(0.5)),
+                borderRadius: BorderRadius.circular(4),
+                color: sevColor.withOpacity(0.1),
               ),
+              child: Text(rule.nivelSeveridad,
+                  style: AppTextStyles.bodySmall
+                      .copyWith(color: sevColor, fontWeight: FontWeight.w600)),
             ),
-            const SizedBox(width: 4),
-            IconButton(
-              icon: const Icon(Icons.delete_outline,
-                  size: 14, color: AppColors.eventDeleted),
-              onPressed: onDelete,
-              padding: EdgeInsets.zero,
-              constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
-            ),
-          ]),
-        ),
-        const Divider(height: 1, color: AppColors.border),
-      ]);
+          ),
+          const SizedBox(width: 4),
+          IconButton(
+            icon: Icon(Icons.delete_outline, size: 14, color: c.eventDeleted),
+            onPressed: onDelete,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+          ),
+        ]),
+      ),
+      Divider(height: 1, color: c.border),
+    ]);
+  }
 }

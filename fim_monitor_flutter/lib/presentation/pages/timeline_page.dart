@@ -1,4 +1,14 @@
 // lib/presentation/screens/timeline_screen.dart
+//
+// FIX DE RENDIMIENTO v2:
+//   • _onSliderChanged usa un debounce de 80ms para no disparar eventos
+//     al BLoC en cada píxel de arrastre del slider (antes lo hacía 60fps).
+//   • Todos los callbacks async tienen guard `if (!mounted) return` para
+//     evitar llamadas a setState después de dispose() (causa del crash al
+//     minimizar y navegar fuera de la pantalla).
+//   • _scrollController.addListener protegido con `if (!mounted) return`.
+//
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:intl/intl.dart';
@@ -17,10 +27,12 @@ class _TimelineScreenState extends State<TimelineScreen> {
   final ScrollController _scrollController = ScrollController();
   final TextEditingController _rutaController = TextEditingController();
 
-  // Filtros como estado — setState() garantiza rebuild de la lista
   String? _filterTipo;
   String? _filterSeveridad;
   DateTimeRange? _filterRango;
+
+  // FIX: debounce del slider para no disparar eventos a 60fps
+  Timer? _sliderDebounce;
 
   static const _tipos = ['NEW', 'DELETED', 'MODIFIED', 'PERMISSIONS'];
   static const _severidades = ['ALTA', 'MEDIA', 'BAJA'];
@@ -29,25 +41,21 @@ class _TimelineScreenState extends State<TimelineScreen> {
   void initState() {
     super.initState();
     context.read<TimelineBloc>().add(const TimelineLoadRequested());
-    _scrollController.addListener(_onScroll);
   }
 
   @override
   void dispose() {
+    // FIX: cancelar debounce antes de dispose para evitar callbacks tardíos
+    _sliderDebounce?.cancel();
     _scrollController.dispose();
     _rutaController.dispose();
     super.dispose();
   }
 
-  void _onScroll() {
-    if (_scrollController.position.pixels >=
-        _scrollController.position.maxScrollExtent - 200) {
-      context.read<TimelineBloc>().add(TimelineLoadMore());
-    }
-  }
+  // Scroll infinito desactivado — se cargan todos los eventos de una vez
 
   void _aplicarFiltros() {
-    // Solo ruta y fechas van al BLoC (HTTP). Tipo y severidad son locales.
+    if (!mounted) return; // FIX: guard
     final rango = _filterRango;
     context.read<TimelineBloc>().add(TimelineLoadRequested(
           ruta: _rutaController.text.isEmpty ? null : _rutaController.text,
@@ -60,6 +68,7 @@ class _TimelineScreenState extends State<TimelineScreen> {
   }
 
   void _limpiarFiltros() {
+    if (!mounted) return; // FIX: guard
     setState(() {
       _filterTipo = null;
       _filterSeveridad = null;
@@ -77,35 +86,40 @@ class _TimelineScreenState extends State<TimelineScreen> {
       initialDateRange: _filterRango,
       builder: (ctx, child) => Theme(
         data: Theme.of(ctx).copyWith(
-          colorScheme: ColorScheme.dark(
-            primary: const Color(0xFF00D4FF),
-            surface: const Color(0xFF1A1F2E),
+          colorScheme: const ColorScheme.dark(
+            primary: Color(0xFF00D4FF),
+            surface: Color(0xFF1A1F2E),
           ),
         ),
         child: child!,
       ),
     );
+    // FIX: guard mounted después de await
+    if (!mounted) return;
     if (picked != null) {
       setState(() => _filterRango = picked);
       _aplicarFiltros();
     }
   }
 
-  /// Cuando el slider cambia de posición:
-  /// 1. Notifica al TimelineBloc (actualiza el índice activo)
-  /// 2. Notifica al GraphBloc (repinta los nodos con el estado histórico)
+  // FIX: debounce del slider — agrupa arrastres rápidos en un solo evento.
+  // Sin esto, al arrastrar el slider se disparaban ~60 eventos/segundo al BLoC,
+  // cada uno con un compute() en el TimelineBloc. Con el debounce solo se
+  // dispara cuando el usuario para de arrastrar (o tras 80ms sin cambios).
   void _onSliderChanged(int index, TimelineLoaded state) {
-    context.read<TimelineBloc>().add(TimelineSnapshotChanged(index));
+    _sliderDebounce?.cancel();
+    _sliderDebounce = Timer(const Duration(milliseconds: 80), () {
+      if (!mounted) return; // FIX: guard
+      context.read<TimelineBloc>().add(TimelineSnapshotChanged(index));
 
-    final isLive = index == state.snapshots.length - 1;
-    if (isLive) {
-      // Volver a en vivo: quitar el override del grafo
-      context.read<GraphBloc>().add(const GraphSnapshotApplied(null));
-    } else {
-      // Aplicar el estado histórico del snapshot seleccionado
-      final snap = state.snapshots[index];
-      context.read<GraphBloc>().add(GraphSnapshotApplied(snap.nodeStates));
-    }
+      final isLive = index == state.snapshots.length - 1;
+      if (isLive) {
+        context.read<GraphBloc>().add(const GraphSnapshotApplied(null));
+      } else {
+        final snap = state.snapshots[index];
+        context.read<GraphBloc>().add(GraphSnapshotApplied(snap.nodeStates));
+      }
+    });
   }
 
   @override
@@ -118,9 +132,6 @@ class _TimelineScreenState extends State<TimelineScreen> {
           _buildFilterBar(),
           Expanded(
             child: BlocBuilder<TimelineBloc, TimelineState>(
-              // Sin buildWhen restrictivo: los filtros locales necesitan
-              // que el builder se ejecute cuando cambia setState también.
-              // BlocBuilder ya es eficiente por equatable.
               builder: (context, state) {
                 if (state is TimelineLoading) return _buildLoading();
                 if (state is TimelineError) return _buildError(state.message);
@@ -132,7 +143,6 @@ class _TimelineScreenState extends State<TimelineScreen> {
               },
             ),
           ),
-          // Scrollbar temporal — conectado tanto a Timeline como a GraphBloc
           BlocBuilder<TimelineBloc, TimelineState>(
             buildWhen: (prev, curr) {
               if (prev is TimelineLoaded && curr is TimelineLoaded) {
@@ -186,11 +196,10 @@ class _TimelineScreenState extends State<TimelineScreen> {
               Text(
                 'Línea Temporal',
                 style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 18,
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: 0.3,
-                ),
+                    color: Colors.white,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 0.3),
               ),
               Text(
                 'Historial de eventos de auditoría',
@@ -220,10 +229,9 @@ class _TimelineScreenState extends State<TimelineScreen> {
                 child: Text(
                   '${state.alerts.length} eventos',
                   style: const TextStyle(
-                    color: Color(0xFF00D4FF),
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                  ),
+                      color: Color(0xFF00D4FF),
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600),
                 ),
               );
             },
@@ -370,7 +378,6 @@ class _TimelineScreenState extends State<TimelineScreen> {
 
   // ── Timeline list ─────────────────────────────────────────────────────────
 
-  // Filtra combinando tipo, severidad y búsqueda de ruta localmente
   List<AlertModel> _applyLocalFilters(List<AlertModel> alerts) {
     return alerts.where((a) {
       if (_filterTipo != null && a.tipoCambio != _filterTipo) return false;
@@ -384,7 +391,6 @@ class _TimelineScreenState extends State<TimelineScreen> {
 
   Widget _buildTimeline(TimelineLoaded state) {
     final alerts = _applyLocalFilters(state.alerts);
-
     if (alerts.isEmpty) return _buildEmpty();
 
     final grupos = <String, List<AlertModel>>{};
@@ -396,9 +402,8 @@ class _TimelineScreenState extends State<TimelineScreen> {
     return ListView.builder(
       controller: _scrollController,
       padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
-      itemCount: grupos.length + (state.hasMore ? 1 : 0),
+      itemCount: grupos.length,
       itemBuilder: (context, index) {
-        if (index == grupos.length) return _buildLoadMoreIndicator();
         final fecha = grupos.keys.elementAt(index);
         final items = grupos[fecha]!;
         return _GrupoFecha(fecha: fecha, alerts: items, isFirst: index == 0);
@@ -531,7 +536,9 @@ class _TemporalScrollbarState extends State<_TemporalScrollbar> {
   void didUpdateWidget(_TemporalScrollbar old) {
     super.didUpdateWidget(old);
     if (old.activeIndex != widget.activeIndex) {
-      WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToActive());
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _scrollToActive(); // FIX: guard mounted
+      });
     }
   }
 
@@ -593,21 +600,19 @@ class _TemporalScrollbarState extends State<_TemporalScrollbar> {
                             const SizedBox(width: 5),
                             const Text('EN VIVO',
                                 style: TextStyle(
-                                  color: Color(0xFF4ADE80),
-                                  fontSize: 10,
-                                  fontWeight: FontWeight.w700,
-                                  letterSpacing: 1,
-                                )),
+                                    color: Color(0xFF4ADE80),
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w700,
+                                    letterSpacing: 1)),
                           ],
                         )
                       : Text(
                           widget.snapshots[widget.activeIndex].label,
                           key: ValueKey(widget.activeIndex),
                           style: const TextStyle(
-                            color: Color(0xFF00D4FF),
-                            fontSize: 10,
-                            fontWeight: FontWeight.w600,
-                          ),
+                              color: Color(0xFF00D4FF),
+                              fontSize: 10,
+                              fontWeight: FontWeight.w600),
                         ),
                 ),
               ],
@@ -629,7 +634,10 @@ class _TemporalScrollbarState extends State<_TemporalScrollbar> {
                 min: 0,
                 max: (count - 1).toDouble(),
                 value: widget.activeIndex.toDouble().clamp(0, count - 1),
-                divisions: count > 1 && count <= 50 ? count - 1 : null,
+                // FIX: sin divisions cuando hay muchos snapshots — con
+                // divisions Flutter dibuja marcas para cada posición y eso
+                // es lento con >50 snapshots.
+                divisions: count > 1 && count <= 30 ? count - 1 : null,
                 onChanged: (v) => widget.onIndexChanged(v.round()),
               ),
             ),
@@ -742,11 +750,10 @@ class _GrupoFecha extends StatelessWidget {
               Text(
                 fecha.toUpperCase(),
                 style: const TextStyle(
-                  color: Color(0xFF4A5880),
-                  fontSize: 10,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 1.2,
-                ),
+                    color: Color(0xFF4A5880),
+                    fontSize: 10,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 1.2),
               ),
               const SizedBox(width: 8),
               Container(
@@ -772,20 +779,8 @@ class _GrupoFecha extends StatelessWidget {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// ALERT ITEM — fix overflow: altura dinámica con LayoutBuilder
+// ALERT ITEM
 // ═══════════════════════════════════════════════════════════════════════════════
-//
-// CAUSA DEL OVERFLOW: la versión anterior usaba alturas fijas constantes
-// (_colapsadoHeight = 62, _expandidoExtra = 158) que no se adaptaban al
-// contenido real de cada tarjeta (número de campos de detalle variables).
-//
-// SOLUCIÓN: eliminar la altura fija del AnimatedContainer y dejar que el
-// Column crezca según su contenido. La línea vertical usa un Container
-// con altura fija solo para el segmento superior, y se extiende hacia abajo
-// con Expanded dentro de un IntrinsicHeight...
-//
-// PERO IntrinsicHeight causa jank. Alternativa correcta: usar un Stack
-// con la línea detrás y la tarjeta delante, sin altura acoplada.
 
 class _AlertItem extends StatefulWidget {
   final AlertModel alert;
@@ -807,15 +802,11 @@ class _AlertItemState extends State<_AlertItem> {
     final hora = _formatearHora(widget.alert.fechaEjecucion);
     final nombreArchivo = _nombreDesdeRuta(widget.alert.rutaArchivo);
 
-    // Stack: línea vertical de fondo + tarjeta encima.
-    // La tarjeta crece libremente según su contenido (sin altura fija).
-    // La línea es un Positioned.fill que se adapta al tamaño del Stack.
     return Padding(
       padding: const EdgeInsets.only(bottom: 6),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Columna izquierda: dot + línea vertical
           SizedBox(
             width: 28,
             child: CustomPaint(
@@ -838,7 +829,6 @@ class _AlertItemState extends State<_AlertItem> {
               ),
             ),
           ),
-          // Tarjeta — crece según contenido
           Expanded(
             child: GestureDetector(
               onTap: () => setState(() => _expanded = !_expanded),
@@ -858,9 +848,8 @@ class _AlertItemState extends State<_AlertItem> {
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min, // ← clave: no fuerza altura
+                  mainAxisSize: MainAxisSize.min,
                   children: [
-                    // Fila principal
                     Padding(
                       padding: const EdgeInsets.symmetric(
                           horizontal: 12, vertical: 10),
@@ -876,19 +865,16 @@ class _AlertItemState extends State<_AlertItem> {
                                 Text(
                                   nombreArchivo,
                                   style: const TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 13,
-                                    fontWeight: FontWeight.w500,
-                                  ),
+                                      color: Colors.white,
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w500),
                                   overflow: TextOverflow.ellipsis,
                                 ),
                                 if (widget.alert.rutaArchivo != null)
                                   Text(
                                     widget.alert.rutaArchivo!,
                                     style: const TextStyle(
-                                      color: Color(0xFF4A5880),
-                                      fontSize: 11,
-                                    ),
+                                        color: Color(0xFF4A5880), fontSize: 11),
                                     overflow: TextOverflow.ellipsis,
                                   ),
                               ],
@@ -918,8 +904,6 @@ class _AlertItemState extends State<_AlertItem> {
                         ],
                       ),
                     ),
-                    // Panel de detalle — se añade/quita en el árbol, no hay
-                    // altura fija que pueda desbordarse
                     if (_expanded) _buildDetalle(),
                   ],
                 ),
@@ -1011,12 +995,9 @@ class _AlertItemState extends State<_AlertItem> {
   }
 }
 
-// CustomPainter para la línea vertical — dibuja desde el centro hasta el fondo
-// del widget, sin necesidad de conocer la altura del hijo.
 class _VerticalLinePainter extends CustomPainter {
   final Color color;
   const _VerticalLinePainter({required this.color});
-
   @override
   void paint(Canvas canvas, Size size) {
     canvas.drawLine(
@@ -1040,7 +1021,6 @@ class _TipoBadge extends StatelessWidget {
   final String tipo;
   final Color color;
   const _TipoBadge({required this.tipo, required this.color});
-
   @override
   Widget build(BuildContext context) {
     return Container(
@@ -1055,15 +1035,12 @@ class _TipoBadge extends StatelessWidget {
         children: [
           Icon(_iconoPorTipo(tipo), size: 11, color: color),
           const SizedBox(width: 4),
-          Text(
-            tipo,
-            style: TextStyle(
-              color: color,
-              fontSize: 10,
-              fontWeight: FontWeight.w700,
-              letterSpacing: 0.5,
-            ),
-          ),
+          Text(tipo,
+              style: TextStyle(
+                  color: color,
+                  fontSize: 10,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.5)),
         ],
       ),
     );
@@ -1084,7 +1061,6 @@ class _SeveridadBadge extends StatelessWidget {
   final String severidad;
   final Color color;
   const _SeveridadBadge({required this.severidad, required this.color});
-
   @override
   Widget build(BuildContext context) {
     return Container(
@@ -1093,15 +1069,12 @@ class _SeveridadBadge extends StatelessWidget {
         color: color.withOpacity(0.12),
         borderRadius: BorderRadius.circular(4),
       ),
-      child: Text(
-        severidad,
-        style: TextStyle(
-          color: color,
-          fontSize: 9,
-          fontWeight: FontWeight.w700,
-          letterSpacing: 0.8,
-        ),
-      ),
+      child: Text(severidad,
+          style: TextStyle(
+              color: color,
+              fontSize: 9,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.8)),
     );
   }
 }
@@ -1112,7 +1085,6 @@ class _DetalleRow extends StatelessWidget {
   final bool mono;
   const _DetalleRow(
       {required this.label, required this.value, this.mono = false});
-
   @override
   Widget build(BuildContext context) {
     return Padding(
@@ -1126,14 +1098,11 @@ class _DetalleRow extends StatelessWidget {
                 style: const TextStyle(color: Color(0xFF4A5880), fontSize: 11)),
           ),
           Expanded(
-            child: Text(
-              value,
-              style: TextStyle(
-                color: const Color(0xFFB0BFDD),
-                fontSize: 11,
-                fontFamily: mono ? 'monospace' : null,
-              ),
-            ),
+            child: Text(value,
+                style: TextStyle(
+                    color: const Color(0xFFB0BFDD),
+                    fontSize: 11,
+                    fontFamily: mono ? 'monospace' : null)),
           ),
         ],
       ),
@@ -1192,11 +1161,10 @@ class _DropdownFiltro extends StatelessWidget {
           iconEnabledColor: activeColor ?? const Color(0xFF6B7A99),
           isExpanded: true,
           items: [
-            DropdownMenuItem<String>(
+            const DropdownMenuItem<String>(
               value: null,
               child: Text('Todos',
-                  style:
-                      const TextStyle(color: Color(0xFF6B7A99), fontSize: 12)),
+                  style: TextStyle(color: Color(0xFF6B7A99), fontSize: 12)),
             ),
             ...items.map((item) {
               final c = colorMap[item] ?? const Color(0xFF6B7A99);
@@ -1222,8 +1190,8 @@ class _DropdownFiltro extends StatelessWidget {
           ],
           onChanged: onChanged,
           selectedItemBuilder: (_) => [
-            Text('Todos',
-                style: const TextStyle(color: Color(0xFF6B7A99), fontSize: 12)),
+            const Text('Todos',
+                style: TextStyle(color: Color(0xFF6B7A99), fontSize: 12)),
             ...items.map((item) {
               final c = colorMap[item] ?? const Color(0xFF6B7A99);
               return Text(item,

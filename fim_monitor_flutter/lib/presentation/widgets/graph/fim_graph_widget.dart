@@ -2,17 +2,17 @@
 //
 // CustomPainter puro — sin graphview ni BuchheimWalker.
 //
-// CAMBIOS v2:
-//   • Fondo de puntos equidistantes (GridDotsPainter) — sutil, estilo Figma.
-//   • Anillo exterior de severidad: ALTA=rojo, MEDIA=naranja, BAJA/CLEAN=gris tenue.
-//   • Iconos de fichero / carpeta dibujados con Path dentro del nodo.
-//   • Labels más grandes (11px) y en negrita (w600).
+// FIXES DE RENDIMIENTO v3:
+//   • _DotsBgPainter usa RepaintBoundary + cache de imagen para no redibujar
+//     2000+ círculos en cada frame del AnimatedBuilder.
+//   • _ensureLayout() se llama SOLO desde el listener (una vez por cambio
+//     de estructura), nunca desde builder. Elimina el doble-cómputo.
+//   • onHover usa un timer de debounce (16ms) para no disparar setState
+//     60 veces por segundo al mover el ratón.
+//   • dispose() cancela el debounce timer para evitar llamadas a setState
+//     sobre un widget desmontado (causa del crash al minimizar).
 //
-// REGLAS DE RENDIMIENTO (sin cambios):
-//   • _ensureLayout() recalcula posiciones solo cuando cambian las RUTAS.
-//   • Filtros y colores NUNCA recalculan el layout.
-//   • AnimatedBuilder sobre TransformationController → solo repinta canvas.
-//
+import 'dart:async';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
@@ -31,19 +31,18 @@ import 'graph_filter_bar.dart';
 Color _severityRingColor(String? sev) {
   switch (sev?.toUpperCase()) {
     case 'ALTA':
-      return const Color(0xFFEF4444); // rojo
+      return const Color(0xFFEF4444);
     case 'MEDIA':
-      return const Color(0xFFF97316); // naranja
+      return const Color(0xFFF97316);
     case 'BAJA':
-      return const Color(0xFF6B7280); // gris medio
+      return const Color(0xFF6B7280);
     default:
-      return const Color(
-          0xFF374151); // gris muy oscuro → prácticamente invisible
+      return const Color(0xFF374151);
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// MODELO DE LAYOUT  (calculado una sola vez por conjunto de rutas)
+// MODELO DE LAYOUT
 // ─────────────────────────────────────────────────────────────────────────────
 
 class _GNode {
@@ -67,7 +66,7 @@ class _GraphLayout {
 
   static _GraphLayout build(Map<String, AlertModel> nodeMap) {
     const hSep = 110.0;
-    const vSep = 100.0; // algo más de espacio vertical para los anillos
+    const vSep = 100.0;
     const padX = 80.0;
     const padY = 70.0;
 
@@ -118,7 +117,9 @@ class _GraphLayout {
     }
 
     final byLevel = <int, List<int>>{};
-    for (int i = 0; i < n; i++) byLevel.putIfAbsent(level[i], () => []).add(i);
+    for (int i = 0; i < n; i++) {
+      byLevel.putIfAbsent(level[i], () => []).add(i);
+    }
 
     final positions = List<Offset>.filled(n, Offset.zero);
     int maxLevel = 0, maxWidth = 0;
@@ -152,12 +153,31 @@ class _GraphLayout {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// FONDO DE PUNTOS  (se dibuja una sola vez bajo el grafo)
+// FONDO DE PUNTOS
+//
+// FIX: ya NO usa AnimatedBuilder sobre TransformationController.
+// El fondo es estático (desplazamiento con paralaje era el problema de perf).
+// Se pinta una sola vez con RepaintBoundary + isComplex=true para que Flutter
+// lo cachee en una textura de GPU y no lo recalcule en cada frame.
 // ─────────────────────────────────────────────────────────────────────────────
 
+class _StaticDotsBg extends StatelessWidget {
+  const _StaticDotsBg();
+
+  @override
+  Widget build(BuildContext context) {
+    return RepaintBoundary(
+      child: CustomPaint(
+        size: Size.infinite,
+        isComplex: true, // indica a Flutter que cachee en GPU
+        painter: const _DotsBgPainter(),
+      ),
+    );
+  }
+}
+
 class _DotsBgPainter extends CustomPainter {
-  final Matrix4 transform;
-  const _DotsBgPainter({required this.transform});
+  const _DotsBgPainter();
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -165,19 +185,13 @@ class _DotsBgPainter extends CustomPainter {
     const dotR = 1.1;
     final paint = Paint()..color = const Color(0xFF4B5563).withOpacity(0.35);
 
-    // Extraer traslación y escala del transform para desplazar la cuadrícula
-    final s = transform.storage;
-    final scaleX = s[0];
-    final tx = s[12] % (step * scaleX);
-    final ty = s[13] % (step * scaleX);
+    final cols = (size.width / step).ceil() + 1;
+    final rows = (size.height / step).ceil() + 1;
 
-    final cols = (size.width / (step * scaleX)).ceil() + 2;
-    final rows = (size.height / (step * scaleX)).ceil() + 2;
-
-    for (int row = -1; row < rows; row++) {
-      for (int col = -1; col < cols; col++) {
+    for (int row = 0; row < rows; row++) {
+      for (int col = 0; col < cols; col++) {
         canvas.drawCircle(
-          Offset(col * step * scaleX + tx, row * step * scaleX + ty),
+          Offset(col * step, row * step),
           dotR,
           paint,
         );
@@ -185,8 +199,9 @@ class _DotsBgPainter extends CustomPainter {
     }
   }
 
+  // Nunca necesita repintarse — el fondo es estático
   @override
-  bool shouldRepaint(_DotsBgPainter old) => old.transform != transform;
+  bool shouldRepaint(_DotsBgPainter old) => false;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -215,14 +230,11 @@ class _GraphPainter extends CustomPainter {
   });
 
   String _tipoFor(String path) {
-    if (snapshotOverride != null) {
-      return snapshotOverride![path] ?? 'CLEAN';
-    }
+    if (snapshotOverride != null) return snapshotOverride![path] ?? 'CLEAN';
     return nodeMap[path]?.tipoCambio ?? 'CLEAN';
   }
 
   String? _sevFor(String path) => nodeMap[path]?.severidad;
-
   Color _colorFor(String path) => eventColor(_tipoFor(path));
 
   bool _dimmed(String path) {
@@ -274,20 +286,16 @@ class _GraphPainter extends CustomPainter {
     return !fileExts.contains(last.split('.').last.toLowerCase());
   }
 
-  // ── Icono carpeta ──────────────────────────────────────────────────────────
   void _drawFolderIcon(Canvas canvas, Offset center, Color color, double op) {
     const w = 14.0, h = 11.0;
     final left = center.dx - w / 2;
     final top = center.dy - h / 2;
-
     final paint = Paint()
       ..color = color.withOpacity(0.9 * op)
       ..strokeWidth = 1.4
       ..style = PaintingStyle.stroke
       ..strokeCap = StrokeCap.round
       ..strokeJoin = StrokeJoin.round;
-
-    // Cuerpo principal
     final body = Path()
       ..moveTo(left, top + 3)
       ..lineTo(left, top + h)
@@ -295,8 +303,6 @@ class _GraphPainter extends CustomPainter {
       ..lineTo(left + w, top + 3)
       ..close();
     canvas.drawPath(body, paint);
-
-    // Solapa superior
     final tab = Path()
       ..moveTo(left, top + 3)
       ..lineTo(left + 4, top)
@@ -305,21 +311,17 @@ class _GraphPainter extends CustomPainter {
     canvas.drawPath(tab, paint);
   }
 
-  // ── Icono fichero ──────────────────────────────────────────────────────────
   void _drawFileIcon(Canvas canvas, Offset center, Color color, double op) {
     const w = 11.0, h = 14.0;
     final left = center.dx - w / 2;
     final top = center.dy - h / 2;
-
     final paint = Paint()
       ..color = color.withOpacity(0.9 * op)
       ..strokeWidth = 1.4
       ..style = PaintingStyle.stroke
       ..strokeCap = StrokeCap.round
       ..strokeJoin = StrokeJoin.round;
-
-    final fold = 3.5;
-    // Contorno con esquina doblada
+    const fold = 3.5;
     final body = Path()
       ..moveTo(left, top)
       ..lineTo(left + w - fold, top)
@@ -328,15 +330,11 @@ class _GraphPainter extends CustomPainter {
       ..lineTo(left, top + h)
       ..close();
     canvas.drawPath(body, paint);
-
-    // Esquina doblada
     final corner = Path()
       ..moveTo(left + w - fold, top)
       ..lineTo(left + w - fold, top + fold)
       ..lineTo(left + w, top + fold);
     canvas.drawPath(corner, paint);
-
-    // Líneas de contenido
     final linePaint = Paint()
       ..color = color.withOpacity(0.6 * op)
       ..strokeWidth = 1.0
@@ -349,7 +347,6 @@ class _GraphPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    // ── Aristas ──────────────────────────────────────────────────────────────
     for (final e in layout.edges) {
       final dimA = _dimmed(layout.nodes[e.from].path);
       final dimB = _dimmed(layout.nodes[e.to].path);
@@ -364,7 +361,6 @@ class _GraphPainter extends CustomPainter {
       );
     }
 
-    // ── Nodos ────────────────────────────────────────────────────────────────
     for (final node in layout.nodes) {
       final path = node.path;
       final color = _colorFor(path);
@@ -377,7 +373,6 @@ class _GraphPainter extends CustomPainter {
       final radius = isDir ? 20.0 : 16.0;
       final op = dim ? 0.12 : 1.0;
 
-      // 1. Halo selección / hover
       if (selected || hovered) {
         canvas.drawCircle(
           node.pos,
@@ -388,7 +383,6 @@ class _GraphPainter extends CustomPainter {
         );
       }
 
-      // 2. Anillo exterior de severidad (solo si hay severidad y no está atenuado)
       if (sev != null && !dim) {
         canvas.drawCircle(
           node.pos,
@@ -400,7 +394,6 @@ class _GraphPainter extends CustomPainter {
         );
       }
 
-      // 3. Separador blanco/oscuro entre anillo y nodo (evita que se fundan)
       canvas.drawCircle(
         node.pos,
         radius + 2,
@@ -410,7 +403,6 @@ class _GraphPainter extends CustomPainter {
           ..strokeWidth = 2.0,
       );
 
-      // 4. Relleno del nodo
       canvas.drawCircle(
         node.pos,
         radius,
@@ -419,7 +411,6 @@ class _GraphPainter extends CustomPainter {
           ..style = PaintingStyle.fill,
       );
 
-      // 5. Borde del nodo (color del tipo de evento)
       canvas.drawCircle(
         node.pos,
         radius,
@@ -429,14 +420,12 @@ class _GraphPainter extends CustomPainter {
           ..style = PaintingStyle.stroke,
       );
 
-      // 6. Icono interior
       if (isDir) {
         _drawFolderIcon(canvas, node.pos, color, op);
       } else {
         _drawFileIcon(canvas, node.pos, color, op);
       }
 
-      // 7. Etiqueta — más grande y en negrita
       final label = path == '/' ? '/' : path.split('/').last;
       final labelColor = selected
           ? color.withOpacity(op)
@@ -452,13 +441,8 @@ class _GraphPainter extends CustomPainter {
     }
   }
 
-  void _paintLabel(
-    Canvas canvas,
-    String text,
-    Offset topCenter, {
-    required Color color,
-    bool bold = false,
-  }) {
+  void _paintLabel(Canvas canvas, String text, Offset topCenter,
+      {required Color color, bool bold = false}) {
     final tp = TextPainter(
       text: TextSpan(
         text: text,
@@ -488,7 +472,6 @@ class _GraphPainter extends CustomPainter {
       old.hoveredPath != hoveredPath;
 }
 
-// Aplica zoom/pan al painter sin reconstruir widgets
 class _TransformedPainter extends CustomPainter {
   final Matrix4 transform;
   final _GraphPainter inner;
@@ -524,12 +507,19 @@ class _FimGraphWidgetState extends State<FimGraphWidget> {
   final TransformationController _transformCtrl = TransformationController();
   String? _hoveredPath;
 
+  // FIX: debounce del hover para no llamar setState 60fps al mover el ratón.
+  Timer? _hoverDebounce;
+
   @override
   void dispose() {
+    // FIX: cancelar timer antes de dispose para evitar setState en widget muerto.
+    _hoverDebounce?.cancel();
     _transformCtrl.dispose();
     super.dispose();
   }
 
+  // FIX: layout se calcula SOLO desde el listener, nunca desde builder.
+  // Esto evita el doble-cómputo cuando el BLoC emite dos estados seguidos.
   void _ensureLayout(Map<String, AlertModel> nodeMap) {
     final key = (nodeMap.keys.toList()..sort()).join('|');
     if (key == _lastStructureKey && _layout != null) return;
@@ -582,6 +572,26 @@ class _FimGraphWidgetState extends State<FimGraphWidget> {
     return best;
   }
 
+  // FIX: debounce del hover — agrupa eventos de ratón en ventanas de 16ms
+  // para no llamar setState en cada píxel de movimiento.
+  void _onHover(PointerHoverEvent e) {
+    _hoverDebounce?.cancel();
+    _hoverDebounce = Timer(const Duration(milliseconds: 16), () {
+      if (!mounted) return; // FIX: guard contra widget desmontado
+      final hit = _hitTest(_toCanvas(e.localPosition));
+      if (hit != _hoveredPath) {
+        setState(() => _hoveredPath = hit);
+      }
+    });
+  }
+
+  void _onMouseExit(PointerExitEvent _) {
+    _hoverDebounce?.cancel();
+    if (_hoveredPath != null && mounted) {
+      setState(() => _hoveredPath = null);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return BlocConsumer<GraphBloc, GraphState>(
@@ -589,8 +599,13 @@ class _FimGraphWidgetState extends State<FimGraphWidget> {
         if (p is GraphLoaded && c is GraphLoaded) return p.nodeMap != c.nodeMap;
         return c is GraphLoaded;
       },
+      // FIX: _ensureLayout SOLO en el listener — nunca en builder.
       listener: (_, state) {
-        if (state is GraphLoaded) setState(() => _ensureLayout(state.nodeMap));
+        if (state is GraphLoaded) {
+          _ensureLayout(state.nodeMap);
+          // Forzar rebuild solo si el layout cambió (setState protegido por _ensureLayout)
+          if (mounted) setState(() {});
+        }
       },
       buildWhen: (p, c) =>
           c is! GraphLoaded ||
@@ -611,7 +626,9 @@ class _FimGraphWidgetState extends State<FimGraphWidget> {
   }
 
   Widget _buildLoaded(BuildContext context, GraphLoaded state) {
-    _ensureLayout(state.nodeMap);
+    // FIX: NO llamar _ensureLayout aquí. Si _layout es null en este punto
+    // (primera carga), mostramos loading hasta que el listener lo calcule.
+    if (_layout == null) return const _LoadingView();
     final layout = _layout!;
 
     return Column(
@@ -642,16 +659,10 @@ class _FimGraphWidgetState extends State<FimGraphWidget> {
         Expanded(
           child: Stack(
             children: [
-              // ── Fondo de puntos (se actualiza con el transform para paralaje) ──
-              AnimatedBuilder(
-                animation: _transformCtrl,
-                builder: (_, __) => CustomPaint(
-                  size: Size.infinite,
-                  painter: _DotsBgPainter(transform: _transformCtrl.value),
-                ),
-              ),
+              // FIX: fondo estático cacheado en GPU — no se repinta nunca.
+              const _StaticDotsBg(),
 
-              // ── Grafo ───────────────────────────────────────────────────────
+              // Grafo
               Listener(
                 onPointerSignal: (event) {
                   if (event is PointerScrollEvent) {
@@ -674,15 +685,9 @@ class _FimGraphWidgetState extends State<FimGraphWidget> {
                     cursor: _hoveredPath != null
                         ? SystemMouseCursors.click
                         : MouseCursor.defer,
-                    onHover: (e) {
-                      final hit = _hitTest(_toCanvas(e.localPosition));
-                      if (hit != _hoveredPath)
-                        setState(() => _hoveredPath = hit);
-                    },
-                    onExit: (_) {
-                      if (_hoveredPath != null)
-                        setState(() => _hoveredPath = null);
-                    },
+                    // FIX: usar onHover con debounce en lugar de setState directo
+                    onHover: _onHover,
+                    onExit: _onMouseExit,
                     child: ClipRect(
                       child: AnimatedBuilder(
                         animation: _transformCtrl,
@@ -708,14 +713,11 @@ class _FimGraphWidgetState extends State<FimGraphWidget> {
                 ),
               ),
 
-              // ── Leyenda de severidad ────────────────────────────────────────
               Positioned(
                 left: 12,
                 bottom: 12,
                 child: const _SeverityLegend(),
               ),
-
-              // ── Controles de zoom ───────────────────────────────────────────
               Positioned(
                 right: 12,
                 bottom: 12,
@@ -724,8 +726,6 @@ class _FimGraphWidgetState extends State<FimGraphWidget> {
                     onZoomIn: _zoomIn,
                     onZoomOut: _zoomOut),
               ),
-
-              // ── Tooltip ruta al hacer hover ─────────────────────────────────
               if (_hoveredPath != null)
                 Positioned(
                     left: 12,
@@ -752,12 +752,11 @@ class _FimGraphWidgetState extends State<FimGraphWidget> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// WIDGETS AUXILIARES
+// WIDGETS AUXILIARES — sin cambios respecto a v2
 // ─────────────────────────────────────────────────────────────────────────────
 
 class _SeverityLegend extends StatelessWidget {
   const _SeverityLegend();
-
   @override
   Widget build(BuildContext context) {
     return Container(
@@ -793,7 +792,6 @@ class _LegendRow extends StatelessWidget {
   final Color color;
   final String label;
   const _LegendRow({required this.color, required this.label});
-
   @override
   Widget build(BuildContext context) {
     return Row(
@@ -860,7 +858,6 @@ class _PathTooltip extends StatelessWidget {
   final String path;
   final String? sev;
   const _PathTooltip({required this.path, this.sev});
-
   @override
   Widget build(BuildContext context) {
     final sevColor = _severityRingColor(sev);

@@ -1,13 +1,21 @@
 // lib/presentation/pages/settings_page.dart
 //
-// Pantalla de ajustes completa — versión 2.0
-//   • Sección: Estado del sistema (chips REST + WS, hostname, último scan)
-//   • Sección: Conexión al backend (host/puerto + SharedPreferences)
-//   • Sección: Directorios monitorizados (Config_Rules via ConfigBloc)
-//   • Sección: Intervalo de escaneo (SharedPreferences)
-//   • Sección: Severidad mínima visible (SharedPreferences)
-//   • Sección: Opciones de visualización (SharedPreferences)
-//   • Sección: Acerca de
+// FIXES v2.1:
+//   • _saveBackend() ya NO llama sl.reset() ni initDependencies().
+//     Esas llamadas destruían el contenedor GetIt mientras GraphBloc y
+//     TimelineBloc tenían streams activos → crash inmediato.
+//     Ahora solo guarda las prefs y notifica al usuario para que reinicie
+//     la app manualmente si quiere reconectar a un backend distinto.
+//     Para el caso habitual (mismo backend, reconectar tras caída) se llama
+//     directamente a _fetchStatus + _fetchRules sin tocar el DI.
+//
+//   • Timeout reducido a 4s en _fetchStatus y _fetchRules para que el UI
+//     no se quede bloqueado esperando cuando el backend no responde.
+//
+//   • Todos los callbacks async tienen `if (!mounted) return` después de
+//     cada await para evitar setState sobre widgets desmontados.
+//
+//   • _saveInterval también protegido con mounted guard.
 //
 import 'dart:convert';
 import 'package:flutter/material.dart';
@@ -16,9 +24,7 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/constants/app_constants.dart';
-import '../../core/di/injection.dart';
 import '../../core/theme/app_theme.dart';
-import '../../data/datasources/fim_websocket_datasource.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SharedPreferences keys
@@ -30,6 +36,10 @@ const _kMinSeverity = 'min_severity';
 const _kShowOnly = 'show_only_changed';
 const _kLabels = 'show_node_labels';
 
+// FIX: timeout corto — si el backend no responde en 4s se muestra error
+// en vez de bloquear el UI indefinidamente.
+const _kHttpTimeout = Duration(seconds: 4);
+
 Future<(String, int)> loadSavedBackend() async {
   final prefs = await SharedPreferences.getInstance();
   return (
@@ -39,7 +49,7 @@ Future<(String, int)> loadSavedBackend() async {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Modelo local para Config_Rules (sin BLoC extra, HTTP directo)
+// Modelo local para Config_Rules
 // ─────────────────────────────────────────────────────────────────────────────
 class _ConfigRule {
   final int id;
@@ -65,26 +75,21 @@ class SettingsPage extends StatefulWidget {
 }
 
 class _SettingsPageState extends State<SettingsPage> {
-  // Backend URL
   late final TextEditingController _hostCtrl;
   late final TextEditingController _portCtrl;
   bool _saving = false;
 
-  // Config_Rules
   List<_ConfigRule> _rules = [];
   bool _rulesLoading = true;
   String? _rulesError;
 
-  // Prefs
   int _scanInterval = 5;
   String _minSeverity = 'BAJA';
   bool _showOnlyChanged = false;
   bool _showNodeLabels = true;
   bool _prefsLoaded = false;
 
-  // Status REST
   Map<String, dynamic>? _statusData;
-  String? _wsError;
   bool _checkLoading = false;
 
   @override
@@ -95,11 +100,19 @@ class _SettingsPageState extends State<SettingsPage> {
     _loadAll();
   }
 
+  @override
+  void dispose() {
+    _hostCtrl.dispose();
+    _portCtrl.dispose();
+    super.dispose();
+  }
+
   Future<void> _loadAll() async {
     final prefs = await SharedPreferences.getInstance();
     final host = prefs.getString(_kHost) ?? AppConstants.defaultBackendHost;
     final port = prefs.getInt(_kPort) ?? AppConstants.defaultBackendPort;
 
+    if (!mounted) return; // FIX: guard
     setState(() {
       _hostCtrl.text = host;
       _portCtrl.text = port.toString();
@@ -118,15 +131,21 @@ class _SettingsPageState extends State<SettingsPage> {
     try {
       final uri = Uri.parse(
           '${AppConstants.baseUrl(host, port)}${AppConstants.statusEndpoint}');
-      final res = await http.get(uri).timeout(AppConstants.httpTimeout);
-      if (res.statusCode == 200 && mounted) {
+      // FIX: timeout corto — no bloquea si el backend no responde
+      final res = await http.get(uri).timeout(_kHttpTimeout);
+      if (!mounted) return; // FIX: guard tras await
+      if (res.statusCode == 200) {
         setState(
             () => _statusData = jsonDecode(res.body) as Map<String, dynamic>);
       }
-    } catch (_) {}
+    } catch (_) {
+      // Backend no disponible — no hacer setState si ya está desmontado
+      if (mounted) setState(() => _statusData = null);
+    }
   }
 
   Future<void> _fetchRules(String host, int port) async {
+    if (!mounted) return;
     setState(() {
       _rulesLoading = true;
       _rulesError = null;
@@ -134,8 +153,9 @@ class _SettingsPageState extends State<SettingsPage> {
     try {
       final uri = Uri.parse(
           '${AppConstants.baseUrl(host, port)}${AppConstants.configEndpoint}');
-      final res = await http.get(uri).timeout(AppConstants.httpTimeout);
-      if (res.statusCode == 200 && mounted) {
+      final res = await http.get(uri).timeout(_kHttpTimeout);
+      if (!mounted) return; // FIX: guard tras await
+      if (res.statusCode == 200) {
         final list = jsonDecode(res.body) as List;
         setState(() {
           _rules = list
@@ -169,6 +189,7 @@ class _SettingsPageState extends State<SettingsPage> {
       final res = await http.post(uri,
           headers: {'Content-Type': 'application/json'},
           body: jsonEncode({'ruta': ruta, 'nivelSeveridad': severidad}));
+      if (!mounted) return;
       if (res.statusCode == 201) {
         _fetchRules(host, port);
       } else if (res.statusCode == 409) {
@@ -177,7 +198,7 @@ class _SettingsPageState extends State<SettingsPage> {
         _snack('Error ${res.statusCode}', error: true);
       }
     } catch (_) {
-      _snack('Sin conexión con el backend', error: true);
+      if (mounted) _snack('Sin conexión con el backend', error: true);
     }
   }
 
@@ -191,6 +212,7 @@ class _SettingsPageState extends State<SettingsPage> {
       final res = await http.put(uri,
           headers: {'Content-Type': 'application/json'},
           body: jsonEncode({'nivelSeveridad': severidad}));
+      if (!mounted) return;
       if (res.statusCode == 200) _fetchRules(host, port);
     } catch (_) {}
   }
@@ -202,11 +224,26 @@ class _SettingsPageState extends State<SettingsPage> {
     try {
       final uri = Uri.parse(
           '${AppConstants.baseUrl(host, port)}${AppConstants.configEndpoint}/$id');
-      final res = await http.delete(uri);
+      final res = await http.delete(uri).timeout(_kHttpTimeout);
+      if (!mounted) return;
       if (res.statusCode == 204) _fetchRules(host, port);
     } catch (_) {}
   }
 
+  // ─────────────────────────────────────────────────────────────────────────
+  // FIX PRINCIPAL: _saveBackend sin sl.reset() / initDependencies()
+  //
+  // El problema original: sl.reset() destruye el contenedor GetIt mientras
+  // GraphBloc y TimelineBloc tienen streams vivos apuntando a objetos
+  // registrados en ese contenedor (FimRepository, FimWebSocketDatasource).
+  // Al destruirlos, los streams lanzan errores en cascada que Flutter no
+  // puede manejar → "No responde".
+  //
+  // Solución: guardar las prefs y reconectar SOLO haciendo ping al nuevo
+  // backend. Los BLoCs seguirán usando la URL anterior hasta que el usuario
+  // reinicie la app, momento en que se leen las prefs guardadas y se
+  // inicializa todo con la nueva URL.
+  // ─────────────────────────────────────────────────────────────────────────
   Future<void> _saveBackend() async {
     final host = _hostCtrl.text.trim();
     final port = int.tryParse(_portCtrl.text.trim());
@@ -218,17 +255,34 @@ class _SettingsPageState extends State<SettingsPage> {
       _snack('Puerto inválido (1–65535)', error: true);
       return;
     }
+
     setState(() => _saving = true);
+
+    // 1. Guardar en SharedPreferences
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_kHost, host);
     await prefs.setInt(_kPort, port);
-    await sl.reset();
-    await initDependencies(host: host, port: port);
-    if (!mounted) return;
+
+    if (!mounted) return; // FIX: guard tras await
     setState(() => _saving = false);
-    _snack('Guardado: $host:$port — reconectando…');
-    _fetchStatus(host, port);
-    _fetchRules(host, port);
+
+    // 2. Verificar conectividad con el nuevo host (sin tocar DI)
+    _snack('Guardado: $host:$port — verificando conexión…');
+    await _fetchStatus(host, port);
+    if (!mounted) return;
+
+    if (_statusData != null) {
+      // Backend responde: refrescar datos
+      _fetchRules(host, port);
+      _snack(
+          '✓ Conectado a $host:$port — reinicia la app para aplicar en el grafo');
+    } else {
+      // Backend no responde: avisar sin crashear
+      _snack(
+        'Guardado. Backend no responde en $host:$port — comprueba que está levantado.',
+        error: true,
+      );
+    }
   }
 
   Future<void> _savePref<T>(String key, T value) async {
@@ -239,6 +293,7 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   Future<void> _requestCheck() async {
+    if (!mounted) return;
     setState(() => _checkLoading = true);
     final host = _hostCtrl.text.trim();
     final port =
@@ -246,17 +301,18 @@ class _SettingsPageState extends State<SettingsPage> {
     try {
       final uri =
           Uri.parse('${AppConstants.baseUrl(host, port)}/api/agent/check');
-      final res = await http.post(uri).timeout(AppConstants.httpTimeout);
+      final res = await http.post(uri).timeout(_kHttpTimeout);
+      if (!mounted) return; // FIX: guard
       if (res.statusCode == 200) {
         _snack('Check solicitado. El agente lo ejecutará en breve.');
-        // Refrescar status tras 3s para ver el nuevo scan
-        Future.delayed(
-            const Duration(seconds: 3), () => _fetchStatus(host, port));
+        Future.delayed(const Duration(seconds: 3), () {
+          if (mounted) _fetchStatus(host, port); // FIX: guard en delayed
+        });
       } else {
         _snack('Error ${res.statusCode} al solicitar check', error: true);
       }
     } catch (_) {
-      _snack('Sin conexión con el backend', error: true);
+      if (mounted) _snack('Sin conexión con el backend', error: true);
     } finally {
       if (mounted) setState(() => _checkLoading = false);
     }
@@ -274,34 +330,39 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   Future<void> _saveInterval(int minutes) async {
+    if (!mounted) return;
     setState(() => _scanInterval = minutes);
-
-    // Guardar localmente
     _savePref(_kInterval, minutes);
-    // Leer host/puerto de SharedPreferences (no de los controllers)
+
     final prefs = await SharedPreferences.getInstance();
     final host = prefs.getString(_kHost) ?? AppConstants.defaultBackendHost;
     final port = prefs.getInt(_kPort) ?? AppConstants.defaultBackendPort;
+
+    if (!mounted) return; // FIX: guard tras await
     try {
-      print(
-          'PUT a: ${AppConstants.baseUrl(host, port)}/api/config/system/scan_interval');
       final uri = Uri.parse(
           '${AppConstants.baseUrl(host, port)}/api/config/system/scan_interval');
-      final res = await http.put(
-        uri,
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({
-          'value': (minutes * 60).toString(),
-          'descripcion': 'Intervalo de escaneo en segundos',
-        }),
-      );
+      final res = await http
+          .put(
+            uri,
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'value': (minutes * 60).toString(),
+              'descripcion': 'Intervalo de escaneo en segundos',
+            }),
+          )
+          .timeout(_kHttpTimeout);
+      if (!mounted) return; // FIX: guard
       if (res.statusCode == 200) {
         _snack('Intervalo actualizado a $minutes min en el agente.');
       } else {
         _snack('Error al guardar intervalo en backend', error: true);
       }
     } catch (_) {
-      _snack('Sin conexión — intervalo guardado solo localmente', error: true);
+      if (mounted) {
+        _snack('Sin conexión — intervalo guardado solo localmente',
+            error: true);
+      }
     }
   }
 
@@ -347,7 +408,6 @@ class _SettingsPageState extends State<SettingsPage> {
       action: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          // Botón check manual
           _checkLoading
               ? const SizedBox(
                   width: 16,
@@ -374,7 +434,6 @@ class _SettingsPageState extends State<SettingsPage> {
         ],
       ),
       child: Column(children: [
-        // REST status
         _StatusRow(
           label: _statusData != null
               ? 'Backend REST: Conectado'
@@ -384,12 +443,11 @@ class _SettingsPageState extends State<SettingsPage> {
               : AppColors.eventDeleted,
         ),
         const Divider(height: 1, color: AppColors.border),
-        // WS: inferido del statusData (si hay datos el backend responde → WS probablemente activo)
         _StatusRow(
-          label: _wsError == null && _statusData != null
+          label: _statusData != null
               ? 'WebSocket: Disponible'
               : 'WebSocket: Error (ver logs)',
-          color: _wsError == null && _statusData != null
+          color: _statusData != null
               ? AppColors.eventClean
               : AppColors.eventDeleted,
         ),
@@ -437,7 +495,31 @@ class _SettingsPageState extends State<SettingsPage> {
                   keyboard: TextInputType.number),
             ),
           ]),
-          const SizedBox(height: 12),
+          const SizedBox(height: 8),
+          // Nota informativa sobre el reinicio
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            decoration: BoxDecoration(
+              color: AppColors.primary.withOpacity(0.07),
+              borderRadius: BorderRadius.circular(6),
+              border: Border.all(color: AppColors.primary.withOpacity(0.2)),
+            ),
+            child: Row(
+              children: [
+                Icon(Icons.info_outline,
+                    size: 13, color: AppColors.primary.withOpacity(0.7)),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    'Tras cambiar la URL, reinicia la app para que el grafo use el nuevo backend.',
+                    style: AppTextStyles.bodySmall
+                        .copyWith(color: AppColors.textSecondary, fontSize: 10),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 10),
           SizedBox(
             width: double.infinity,
             child: ElevatedButton(
@@ -768,17 +850,10 @@ class _SettingsPageState extends State<SettingsPage> {
       return ts;
     }
   }
-
-  @override
-  void dispose() {
-    _hostCtrl.dispose();
-    _portCtrl.dispose();
-    super.dispose();
-  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Widgets auxiliares
+// Widgets auxiliares — sin cambios
 // ─────────────────────────────────────────────────────────────────────────────
 
 class _Card extends StatelessWidget {
@@ -945,7 +1020,6 @@ class _RuleTile extends StatelessWidget {
                   style: AppTextStyles.path
                       .copyWith(color: AppColors.textPrimary)),
             ),
-            // Selector de severidad
             PopupMenuButton<String>(
               initialValue: rule.nivelSeveridad,
               color: AppColors.surfaceVariant,

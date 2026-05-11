@@ -126,7 +126,7 @@ class _TimelineScreenState extends State<TimelineScreen> {
         }
       },
       child: ColoredBox(
-        color: c.background,
+        color: c.surfaceVariant,
         child: Column(
           children: [
             _buildHeader(c),

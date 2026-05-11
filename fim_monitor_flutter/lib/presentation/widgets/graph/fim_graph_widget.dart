@@ -15,11 +15,16 @@
 //     pero no dispara rebuilds mientras está invisible.
 //   • _StaticDotsBg con RepaintBoundary ya cacheada en GPU — sin cambios.
 //
+// MEJORAS VISUALES v6 (Estética Cyberpunk):
+//   • Líneas de conexión con gradiente direccional (flujo).
+//   • Glow (brillo acelerado por hardware) para nodos de ALTA severidad.
+//   • MiniMapa (Glassmorphism) para visión global.
+//
 import 'dart:async';
 import 'dart:math' as math;
+import 'dart:ui' as ui; // <-- Necesario para ImageFilter, Gradient, etc.
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
-import 'package:flutter/widgets.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -222,6 +227,7 @@ class _GraphPainter extends CustomPainter {
   Color _ringColor(String? sev) {
     switch (sev?.toUpperCase()) {
       case 'ALTA':
+      case 'CRITICA':
         return colors.severityHigh;
       case 'MEDIA':
         return colors.severityMedium;
@@ -340,17 +346,44 @@ class _GraphPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
+    // Detectamos si el fondo es claro para aumentar el contraste de las opacidades
+    final isLight = colors.background.computeLuminance() > 0.5;
+
+    // 1. DIBUJAR LÍNEAS CON GRADIENTE DIRECCIONAL
     for (final e in layout.edges) {
       final dim = _dimmed(layout.nodes[e.from].path) &&
           _dimmed(layout.nodes[e.to].path);
+
+      final p1 = layout.nodes[e.from].pos;
+      final p2 = layout.nodes[e.to].pos;
+
+      final colorHijo = _colorFor(layout.nodes[e.to].path);
+
+      // En modo claro subimos la opacidad base de 0.15 a 0.4, y la final a 0.8
+      final baseLineOp = isLight ? 0.4 : 0.15;
+      final endLineOp = isLight ? 0.8 : 0.5;
+
+      final gradient = ui.Gradient.linear(
+        p1,
+        p2,
+        [
+          colors.border.withOpacity(dim ? 0.05 : baseLineOp),
+          colorHijo.withOpacity(dim ? 0.05 : endLineOp),
+        ],
+      );
+
       canvas.drawLine(
-          layout.nodes[e.from].pos,
-          layout.nodes[e.to].pos,
+          p1,
+          p2,
           Paint()
-            ..color = colors.border.withOpacity(dim ? 0.08 : 0.45)
-            ..strokeWidth = dim ? 0.5 : 1.0
+            ..shader = gradient
+            ..strokeWidth = dim
+                ? 0.5
+                : (isLight ? 2.0 : 1.5) // Un poco más gruesas en blanco
             ..style = PaintingStyle.stroke);
     }
+
+    // 2. DIBUJAR NODOS Y GLOW
     for (final node in layout.nodes) {
       final path = node.path;
       final color = _colorFor(path);
@@ -362,6 +395,25 @@ class _GraphPainter extends CustomPainter {
       final isDir = _isDir(path);
       final radius = isDir ? 20.0 : 16.0;
       final op = dim ? 0.12 : 1.0;
+
+      // --- EFECTO GLOW (Más intenso en modo claro) ---
+      if (sev != null &&
+          (sev.toUpperCase() == 'ALTA' || sev.toUpperCase() == 'CRITICA') &&
+          !dim) {
+        final glowOp =
+            isLight ? 0.75 : 0.5; // Subimos de 0.5 a 0.75 en light mode
+        final glowPaint = Paint()
+          ..shader = ui.Gradient.radial(
+            node.pos,
+            radius * 2.8,
+            [ring.withOpacity(glowOp), ring.withOpacity(0.0)],
+          );
+        canvas.drawCircle(node.pos, radius * 2.8, glowPaint);
+      }
+
+      // Resto del código de pintado de nodos...
+      // (Aquí te recomiendo subir ligeramente la opacidad del relleno del círculo)
+      final fillOp = isLight ? 0.35 : 0.13;
 
       if (selected || hovered) {
         canvas.drawCircle(
@@ -376,10 +428,22 @@ class _GraphPainter extends CustomPainter {
             node.pos,
             radius + 5,
             Paint()
-              ..color = ring.withOpacity(0.9)
-              ..strokeWidth = 2.5
+              ..color = ring.withOpacity(isLight ? 1.0 : 0.9)
+              ..strokeWidth = isLight ? 3.0 : 2.5
               ..style = PaintingStyle.stroke);
       }
+
+      // 🟢 EL TRUCO ESTÁ AQUÍ: Fondo interno blanco puro en modo claro
+      // Esto actúa como un "foco" detrás del color para que no se mezcle con el gris del fondo
+      final baseNodeColor = isLight ? Colors.white : colors.background;
+      canvas.drawCircle(
+          node.pos,
+          radius + 2,
+          Paint()
+            ..color = baseNodeColor.withOpacity(dim ? 0.0 : 1.0)
+            ..style = PaintingStyle.fill);
+
+      // Anillo base
       canvas.drawCircle(
           node.pos,
           radius + 2,
@@ -387,23 +451,27 @@ class _GraphPainter extends CustomPainter {
             ..color = colors.background.withOpacity(dim ? 0.0 : 0.8)
             ..style = PaintingStyle.stroke
             ..strokeWidth = 2.0);
+
+      // Relleno de color del nodo (ahora brillará sobre el fondo blanco)
       canvas.drawCircle(
           node.pos,
           radius,
           Paint()
-            ..color = color.withOpacity(0.13 * op)
+            ..color = color.withOpacity(fillOp * op)
             ..style = PaintingStyle.fill);
+
+      // Borde del nodo (más grueso e intenso en modo claro)
       canvas.drawCircle(
           node.pos,
           radius,
           Paint()
             ..color = color.withOpacity(op)
-            ..strokeWidth = selected ? 2.5 : 1.8
+            ..strokeWidth = selected ? 2.5 : (isLight ? 2.5 : 1.8)
             ..style = PaintingStyle.stroke);
+
       isDir
           ? _drawFolderIcon(canvas, node.pos, color, op)
           : _drawFileIcon(canvas, node.pos, color, op);
-
       if (showNodeLabels) {
         final label = path == '/' ? '/' : path.split('/').last;
         final lc = selected
@@ -656,58 +724,58 @@ class _FimGraphWidgetState extends State<FimGraphWidget>
             searchQuery: q)),
       ),
       Expanded(
-        child: Stack(children: [
-          const _StaticDotsBg(),
-          Listener(
-            onPointerSignal: (event) {
-              if (event is PointerScrollEvent) {
-                _applyScaleAt(event.scrollDelta.dy < 0 ? 1.1 : 1 / 1.1,
-                    event.localPosition);
-              }
-            },
-            child: GestureDetector(
-              onPanUpdate: (d) {
-                _transformCtrl.value = _transformCtrl.value.clone()
-                  ..translate(d.delta.dx, d.delta.dy);
+        child: LayoutBuilder(// <-- NUEVO: LayoutBuilder para el minimapa
+            builder: (context, constraints) {
+          return Stack(children: [
+            const _StaticDotsBg(),
+            Listener(
+              onPointerSignal: (event) {
+                if (event is PointerScrollEvent) {
+                  _applyScaleAt(event.scrollDelta.dy < 0 ? 1.1 : 1 / 1.1,
+                      event.localPosition);
+                }
               },
-              onTapUp: (d) {
-                final hit = _hitTest(_toCanvas(d.localPosition));
-                if (hit != null)
-                  context.read<GraphBloc>().add(GraphNodeSelected(hit));
-              },
-              child: MouseRegion(
-                cursor: _hoveredPath != null
-                    ? SystemMouseCursors.click
-                    : MouseCursor.defer,
-                onHover: _onHover,
-                onExit: _onMouseExit,
-                child: ClipRect(
-                  // FIX: Visibility controla si el AnimatedBuilder está activo.
-                  // maintainState: true → el TransformationController conserva
-                  // zoom y posición aunque el widget esté oculto.
-                  // maintainSize: true → el layout no colapsa al ocultar.
-                  child: Visibility(
-                    visible: _appInForeground,
-                    maintainState: true,
-                    maintainSize: false,
-                    maintainAnimation: false, // ← no animar en background
-                    child: AnimatedBuilder(
-                      animation: _transformCtrl,
-                      builder: (_, __) => CustomPaint(
-                        size: Size.infinite,
-                        painter: _TransformedPainter(
-                          transform: _transformCtrl.value,
-                          inner: _GraphPainter(
-                            layout: layout,
-                            nodeMap: state.nodeMap,
-                            colors: c,
-                            snapshotOverride: state.snapshotOverride,
-                            filterTipo: state.filterTipo,
-                            filterSeveridad: state.filterSeveridad,
-                            searchQuery: state.searchQuery,
-                            selectedPath: state.selectedRuta,
-                            hoveredPath: _hoveredPath,
-                            showNodeLabels: _showNodeLabels,
+              child: GestureDetector(
+                onPanUpdate: (d) {
+                  _transformCtrl.value = _transformCtrl.value.clone()
+                    ..translate(d.delta.dx, d.delta.dy);
+                },
+                onTapUp: (d) {
+                  final hit = _hitTest(_toCanvas(d.localPosition));
+                  if (hit != null)
+                    context.read<GraphBloc>().add(GraphNodeSelected(hit));
+                },
+                child: MouseRegion(
+                  cursor: _hoveredPath != null
+                      ? SystemMouseCursors.click
+                      : MouseCursor.defer,
+                  onHover: _onHover,
+                  onExit: _onMouseExit,
+                  child: ClipRect(
+                    child: Visibility(
+                      visible: _appInForeground,
+                      maintainState: true,
+                      maintainSize:
+                          false, // <-- Fijado para evitar el error de aserción
+                      maintainAnimation: false,
+                      child: AnimatedBuilder(
+                        animation: _transformCtrl,
+                        builder: (_, __) => CustomPaint(
+                          size: Size.infinite,
+                          painter: _TransformedPainter(
+                            transform: _transformCtrl.value,
+                            inner: _GraphPainter(
+                              layout: layout,
+                              nodeMap: state.nodeMap,
+                              colors: c,
+                              snapshotOverride: state.snapshotOverride,
+                              filterTipo: state.filterTipo,
+                              filterSeveridad: state.filterSeveridad,
+                              searchQuery: state.searchQuery,
+                              selectedPath: state.selectedRuta,
+                              hoveredPath: _hoveredPath,
+                              showNodeLabels: _showNodeLabels,
+                            ),
                           ),
                         ),
                       ),
@@ -716,21 +784,37 @@ class _FimGraphWidgetState extends State<FimGraphWidget>
                 ),
               ),
             ),
-          ),
-          Positioned(left: 12, bottom: 12, child: _SeverityLegend()),
-          Positioned(
-              right: 12,
-              bottom: 12,
-              child: _ZoomControls(
-                  onReset: _resetZoom, onZoomIn: _zoomIn, onZoomOut: _zoomOut)),
-          if (_hoveredPath != null)
+            Positioned(left: 12, bottom: 12, child: const _SeverityLegend()),
             Positioned(
-                left: 12,
-                top: 12,
-                child: _PathTooltip(
-                    path: _hoveredPath!,
-                    sev: state.nodeMap[_hoveredPath]?.severidad)),
-        ]),
+                right: 12,
+                bottom: 12,
+                child: _ZoomControls(
+                    onReset: _resetZoom,
+                    onZoomIn: _zoomIn,
+                    onZoomOut: _zoomOut)),
+
+            // --- NUEVO: MINIMAPA (Glassmorphism UI) ---
+            Positioned(
+              top: 12,
+              right: 12,
+              child: _MiniMap(
+                layout: layout,
+                transformCtrl: _transformCtrl,
+                colors: c,
+                viewportSize: Size(constraints.maxWidth, constraints.maxHeight),
+              ),
+            ),
+            // -----------------------------------------
+
+            if (_hoveredPath != null)
+              Positioned(
+                  left: 12,
+                  top: 12,
+                  child: _PathTooltip(
+                      path: _hoveredPath!,
+                      sev: state.nodeMap[_hoveredPath!]?.severidad)),
+          ]);
+        }),
       ),
       if (state.selectedRuta != null)
         RepaintBoundary(
@@ -748,7 +832,7 @@ class _FimGraphWidgetState extends State<FimGraphWidget>
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// WIDGETS AUXILIARES (sin cambios respecto a v4)
+// WIDGETS AUXILIARES
 // ─────────────────────────────────────────────────────────────────────────────
 
 class _SeverityLegend extends StatelessWidget {
@@ -943,4 +1027,136 @@ class _ErrorView extends StatelessWidget {
       ),
     ]));
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MINIMAPA (UI y Lógica)
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _MiniMap extends StatelessWidget {
+  final _GraphLayout layout;
+  final TransformationController transformCtrl;
+  final FimColors colors;
+  final Size viewportSize;
+
+  const _MiniMap({
+    required this.layout,
+    required this.transformCtrl,
+    required this.colors,
+    required this.viewportSize,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(8),
+      child: BackdropFilter(
+        // Efecto cristal esmerilado que desenfoca el fondo
+        filter: ui.ImageFilter.blur(sigmaX: 8, sigmaY: 8),
+        child: Container(
+          width: 200,
+          height: 140,
+          decoration: BoxDecoration(
+            color: colors.surface.withOpacity(0.6),
+            border: Border.all(color: colors.border.withOpacity(0.4)),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: AnimatedBuilder(
+            // Solo se redibuja cuando te mueves o haces zoom
+            animation: transformCtrl,
+            builder: (context, _) => CustomPaint(
+              painter: _MiniMapPainter(
+                layout: layout,
+                transform: transformCtrl.value,
+                colors: colors,
+                viewportSize: viewportSize,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _MiniMapPainter extends CustomPainter {
+  final _GraphLayout layout;
+  final Matrix4 transform;
+  final FimColors colors;
+  final Size viewportSize;
+
+  _MiniMapPainter({
+    required this.layout,
+    required this.transform,
+    required this.colors,
+    required this.viewportSize,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (layout.canvasSize.width == 0 || layout.canvasSize.height == 0) return;
+
+    // Calcular escala para que el grafo gigante quepa en el minimapa (con algo de margen)
+    final scaleX = size.width / layout.canvasSize.width;
+    final scaleY = size.height / layout.canvasSize.height;
+    final scale = math.min(scaleX, scaleY) * 0.85;
+
+    final offsetX = (size.width - layout.canvasSize.width * scale) / 2;
+    final offsetY = (size.height - layout.canvasSize.height * scale) / 2;
+
+    final isLight = colors.surface.computeLuminance() > 0.5;
+
+    canvas.save();
+    canvas.translate(offsetX, offsetY);
+    canvas.scale(scale, scale);
+
+    // 1. Dibujar estructura básica muy ligera
+    final edgePaint = Paint()
+      ..color = colors.textSecondary
+          .withOpacity(isLight ? 0.4 : 0.15) // Más oscuro en light mode
+      ..strokeWidth = 3.0 / scale
+      ..style = PaintingStyle.stroke;
+
+    for (final e in layout.edges) {
+      canvas.drawLine(
+          layout.nodes[e.from].pos, layout.nodes[e.to].pos, edgePaint);
+    }
+
+    final nodePaint = Paint()
+      ..color = colors.textSecondary.withOpacity(isLight ? 0.8 : 0.5);
+    for (final node in layout.nodes) {
+      canvas.drawCircle(node.pos, 35.0, nodePaint);
+    }
+    canvas.restore();
+
+    // 2. Dibujar el Viewport (el rectángulo que indica dónde está mirando el usuario)
+    final inv = Matrix4.tryInvert(transform);
+    if (inv != null) {
+      // Dónde empieza y termina la pantalla actual en las coordenadas del mundo gigante
+      final tl = MatrixUtils.transformPoint(inv, Offset.zero);
+      final br = MatrixUtils.transformPoint(
+          inv, Offset(viewportSize.width, viewportSize.height));
+
+      // Mapear eso a nuestro minimapa chiquito
+      final miniTl = Offset(tl.dx * scale + offsetX, tl.dy * scale + offsetY);
+      final miniBr = Offset(br.dx * scale + offsetX, br.dy * scale + offsetY);
+
+      final rectPaint = Paint()
+        ..color = colors.accent.withOpacity(0.9)
+        ..strokeWidth = 1.5
+        ..style = PaintingStyle.stroke;
+
+      final fillPaint = Paint()
+        ..color = colors.accent.withOpacity(0.15)
+        ..style = PaintingStyle.fill;
+
+      final rect = Rect.fromPoints(miniTl, miniBr);
+      canvas.drawRect(rect, fillPaint);
+      canvas.drawRect(rect, rectPaint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_MiniMapPainter old) =>
+      old.transform != transform || old.layout != layout;
 }

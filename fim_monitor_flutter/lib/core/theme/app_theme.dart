@@ -119,37 +119,37 @@ class FimColors extends ThemeExtension<FimColors> {
 
   // ── LIGHT — Slate azulado frío ────────────────────────────────────────────
   static const light = FimColors(
-    background: Color(0xFFF8FAFC), // slate-50
-    surface: Color(0xFFFFFFFF),
-    surfaceVariant: Color(0xFFF1F5F9), // slate-100
-    surfaceCard: Color(0xFFFFFFFF),
-    border: Color(0xFFE2E8F0), // slate-200
-    primary: Color(0xFF16A34A), // green-600
-    primaryDim: Color(0xFF15803D), // green-700
-    onPrimary: Color(0xFFFFFFFF),
-    textPrimary: Color(0xFF0F172A), // slate-900
-    textSecondary: Color(0xFF64748B), // slate-500
-    textDisabled: Color(0xFF94A3B8), // slate-400
-    headerBg: Color(0xFFFFFFFF),
-    headerBorder: Color(0xFFE2E8F0), // slate-200
-    filterBarBg: Color(0xFFF8FAFC), // slate-50
-    itemBg: Color(0xFFFFFFFF),
-    itemBgExpanded: Color(0xFFF1F5F9), // slate-100
-    itemBorder: Color(0xFFE2E8F0), // slate-200
-    itemBorderExpanded: Color(0xFFCBD5E1), // slate-300
-    timelineRailBg: Color(0xFFFFFFFF),
-    timelineRailBorder: Color(0xFFE2E8F0),
-    eventNew: Color(0xFF0284C7), // sky-600
-    eventModified: Color(0xFFD97706), // amber-600
-    eventDeleted: Color(0xFFDC2626), // red-600
-    eventClean: Color(0xFF16A34A), // green-600
-    eventPerms: Color(0xFF7C3AED), // violet-600
-    severityHigh: Color(0xFFDC2626), // red-600
-    severityMedium: Color(0xFFD97706), // amber-600
-    severityLow: Color(0xFF0284C7), // sky-600
-    accent: Color(0xFF0284C7), // sky-600
-    dotsBg: Color(0xFFCBD5E1), // slate-300
-  );
+      background: Color(0xFFE2E8F0), // slate-50
+      surface: Colors.white,
+      surfaceVariant: Color(0xFFE2E8F0), // slate-100
+      surfaceCard: Color(0xFFFFFFFF),
+      border: Color(0xFFE2E8F0), // slate-200
+      primary: Color(0xFF16A34A), // green-600
+      primaryDim: Color(0xFF15803D), // green-700
+      onPrimary: Color(0xFFFFFFFF),
+      textPrimary: Color(0xFF0F172A), // slate-900
+      textSecondary: Color(0xFF64748B), // slate-500
+      textDisabled: Color(0xFF94A3B8), // slate-400
+      headerBg: Color(0xFFFFFFFF),
+      headerBorder: Color(0xFFE2E8F0), // slate-200
+      filterBarBg: Color(0xFFF8FAFC), // slate-50
+      itemBg: Color(0xFFFFFFFF),
+      itemBgExpanded: Color(0xFFF1F5F9), // slate-100
+      itemBorder: Color(0xFFE2E8F0), // slate-200
+      itemBorderExpanded: Color(0xFFCBD5E1), // slate-300
+      timelineRailBg: Color(0xFFFFFFFF),
+      timelineRailBorder: Color(0xFFE2E8F0),
+      eventNew: Color(0xFF0284C7), // sky-600
+      eventModified: Color(0xFFD97706), // amber-600
+      eventDeleted: Color(0xFFDC2626), // red-600
+      eventClean: Color(0xFF16A34A), // green-600
+      eventPerms: Color(0xFF7C3AED), // violet-600
+      severityHigh: Color(0xFFDC2626), // red-600
+      severityMedium: Color(0xFFD97706), // amber-600
+      severityLow: Color(0xFF0284C7), // sky-600
+      accent: Color(0xFF0284C7), // sky-600
+      dotsBg: Color(0xFF94A3B8) // slate-300
+      );
 
   @override
   FimColors copyWith({
